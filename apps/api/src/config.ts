@@ -9,6 +9,8 @@ export const REPO_ROOT = resolve(here, '../../..');
 export interface AppConfig {
   /** 'memory' の場合は PGlite をメモリ上に作る（テスト用） */
   dataDir: string | 'memory';
+  /** .data のルート（PGlite・成果物・worktree・秘密値を置く） */
+  dataRoot: string;
   artifactsDir: string;
   host: string;
   port: number;
@@ -26,6 +28,23 @@ export interface AppConfig {
   seedDemo: boolean;
   serveWebDist: string | null;
   logLevel: 'debug' | 'info' | 'warn' | 'error' | 'silent';
+  /** AI 実行基盤。claude は Claude API、simulated はローカルシミュレーション */
+  agentRuntime: 'claude' | 'simulated';
+  agentRuntimeReason: string;
+  claudeModel: string;
+  claudeEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  worktreesDir: string;
+  testTimeoutMs: number;
+}
+
+function resolveRuntime(): { runtime: 'claude' | 'simulated'; reason: string } {
+  const mode = (process.env.PAW_AGENT_RUNTIME ?? 'auto').toLowerCase();
+  const hasCredential = Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+  if (mode === 'simulated') return { runtime: 'simulated', reason: 'PAW_AGENT_RUNTIME=simulated が指定されています' };
+  if (mode === 'claude') return { runtime: 'claude', reason: 'PAW_AGENT_RUNTIME=claude が指定されています' };
+  return hasCredential
+    ? { runtime: 'claude', reason: 'ANTHROPIC_API_KEY（または ANTHROPIC_AUTH_TOKEN）が設定されています' }
+    : { runtime: 'simulated', reason: 'ANTHROPIC_API_KEY が未設定のためシミュレーションで動作しています' };
 }
 
 interface PersistedSecrets {
@@ -74,8 +93,11 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     ? { sessionSecret: 'test-session-secret', githubWebhookSecret: 'test-webhook-secret' }
     : loadSecrets(root);
   const port = Number(process.env.PAW_API_PORT ?? 8787);
+  const runtime = resolveRuntime();
+  const effort = (process.env.PAW_CLAUDE_EFFORT ?? 'high') as AppConfig['claudeEffort'];
   return {
     dataDir: isMemory ? 'memory' : resolve(root, 'pglite'),
+    dataRoot: root,
     artifactsDir: resolve(root, 'artifacts'),
     host: process.env.PAW_API_HOST ?? '127.0.0.1',
     port,
@@ -96,6 +118,12 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     seedDemo: (process.env.PAW_SEED_DEMO ?? '1') !== '0',
     serveWebDist: null,
     logLevel: (process.env.PAW_LOG_LEVEL as AppConfig['logLevel']) ?? 'info',
+    agentRuntime: runtime.runtime,
+    agentRuntimeReason: runtime.reason,
+    claudeModel: process.env.PAW_CLAUDE_MODEL ?? 'claude-opus-5-5',
+    claudeEffort: ['low', 'medium', 'high', 'xhigh', 'max'].includes(effort) ? effort : 'high',
+    worktreesDir: resolve(root, 'worktrees'),
+    testTimeoutMs: Number(process.env.PAW_TEST_TIMEOUT_MS ?? 600_000),
     ...overrides,
   };
 }

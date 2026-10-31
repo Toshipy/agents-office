@@ -11,15 +11,16 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.134.0",
     "@electric-sql/pglite": "0.5.10",
     "@hono/node-server": "2.1.5",
     "@paw/contracts": "workspace:*",
     "@paw/office-model": "workspace:*",
+    "@paw/sim-content": "workspace:*",
     "drizzle-orm": "0.45.4",
     "hono": "4.13.13",
     "tsx": "4.23.15",
-    "zod": "4.6.7",
-    "@paw/sim-content": "workspace:*"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "22.20.4",

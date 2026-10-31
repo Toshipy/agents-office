@@ -17,6 +17,8 @@ import { ArtifactStore } from './workflow/artifactStore';
 import { WorkflowEngine } from './workflow/engine';
 import { SimulatedRunner } from './agents/simulated';
 import type { AgentRunner } from './agents/runner';
+import { RunnerRouter } from './agents/router';
+import { ClaudeRunner, type ClaudeMessagesClient } from './agents/claude/runner';
 import { Dispatcher } from './github/dispatcher';
 import { MAX_WEBHOOK_BYTES, receiveGithubWebhook } from './github/webhook';
 import { SeatWatcher } from './services/office';
@@ -47,18 +49,29 @@ export type AppEnv = {
   };
 };
 
-export async function createServices(config: AppConfig, runner?: AgentRunner): Promise<Services> {
+export async function createServices(
+  config: AppConfig,
+  opts: { runner?: AgentRunner; claudeClient?: ClaudeMessagesClient } = {},
+): Promise<Services> {
   setLogLevel(config.logLevel);
+  const runner =
+    opts.runner ??
+    new RunnerRouter(
+      new SimulatedRunner({ randomFailures: config.simRandomFailures }),
+      config.agentRuntime === 'claude'
+        ? new ClaudeRunner({
+            model: config.claudeModel,
+            effort: config.claudeEffort,
+            worktreesDir: config.worktreesDir,
+            testTimeoutMs: config.testTimeoutMs,
+            client: opts.claudeClient,
+          })
+        : null,
+    );
   const { db, client } = await openDb(config.dataDir);
   const bus = new EventBus(db);
   const store = new ArtifactStore(db, config.dataDir === 'memory' ? 'memory' : config.artifactsDir);
-  const engine = new WorkflowEngine(
-    db,
-    bus,
-    store,
-    runner ?? new SimulatedRunner({ randomFailures: config.simRandomFailures }),
-    config,
-  );
+  const engine = new WorkflowEngine(db, bus, store, runner, config);
   const dispatcher = new Dispatcher(db, bus, engine);
   const seats = new SeatWatcher(db, bus);
   return { db, client, config, bus, store, engine, dispatcher, seats };

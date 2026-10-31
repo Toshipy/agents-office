@@ -29,13 +29,24 @@ export interface StepExecutionContext {
   /** 直前までの成果（plan / diff / test 等）。エンジンが検証済みのものだけを渡す */
   previous: Record<string, unknown>;
   pr: { number: number; url: string; branch: string; headSha: string } | null;
+  /** この Run の実行基盤（Run 作成時に確定） */
+  runtime: 'claude' | 'simulated';
+  /** Project に設定されたローカル git リポジトリ（Claude 実行時に使用） */
+  localRepo: { path: string; testCommand: string | null } | null;
   signal: AbortSignal;
   log(message: string, kind?: 'log' | 'error'): Promise<void>;
   /** Tool Broker を通したツール呼び出し。拒否されても例外は投げず結果を返す */
   tool(tool: string, args: Record<string, unknown>, summary: string): Promise<{ allowed: boolean; reason: string }>;
   sleep(ms: number): Promise<void>;
   artifact(kind: ArtifactKind, title: string, filename: string, mediaType: string, content: string): Promise<ArtifactRow>;
-  usage(model: string, inputTokens: number, outputTokens: number, durationMs: number): Promise<void>;
+  /** 利用量を記録。costUsd を渡さない場合はシミュレーション単価で推定する */
+  usage(
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+    durationMs: number,
+    extra?: { costUsd?: number; measurement?: 'measured' | 'estimated' },
+  ): Promise<void>;
   allocatePrNumber(): Promise<number>;
 }
 
@@ -49,8 +60,21 @@ export interface StepOutput {
 export interface AgentRunner {
   readonly name: string;
   execute(ctx: StepExecutionContext): Promise<StepOutput>;
+  /** Run が終端状態になったときの後始末（worktree の削除など） */
+  onRunFinished?(runId: string, localRepoPath: string | null, branch: string): Promise<void>;
 }
 
 export class RunnerCrashError extends Error {
   readonly code = 'RUNNER_CRASHED';
+}
+
+/** エラーコードと再試行可否を明示する失敗 */
+export class RunnerError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+  }
 }

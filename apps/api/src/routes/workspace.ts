@@ -78,6 +78,21 @@ export function registerWorkspaceRoutes(app: Hono<AppEnv>, s: Services) {
 
   app.get('/v1/workspaces/me/office-state', async (c) => c.json(await buildOfficeState(s.db, s.engine, auth(c).workspaceId)));
 
+  /** AI 実行基盤の状態（Claude が有効か、どのモデルか） */
+  app.get('/v1/runtime', (c) =>
+    c.json({
+      runtime: s.config.agentRuntime,
+      reason: s.config.agentRuntimeReason,
+      model: s.config.claudeModel,
+      effort: s.config.claudeEffort,
+      fallbacks: 'default',
+      note:
+        s.config.agentRuntime === 'claude'
+          ? 'ローカルリポジトリを設定した Project の Run は Claude で実行されます。それ以外の Project はシミュレーションです。'
+          : 'ANTHROPIC_API_KEY を設定して API を再起動すると、ローカルリポジトリを設定した Project の Run が Claude で実行されます。',
+    }),
+  );
+
   app.get('/v1/agents', async (c) => {
     const a = auth(c);
     const defs = await s.db.select().from(agentDefinitions).where(eq(agentDefinitions.workspaceId, a.workspaceId));
@@ -88,8 +103,13 @@ export function registerWorkspaceRoutes(app: Hono<AppEnv>, s: Services) {
         id: d.id,
         role: d.role,
         name: d.name,
-        model: d.model,
-        runtime: d.runtime,
+        model: s.config.agentRuntime === 'claude' ? s.config.claudeModel : d.model,
+        runtime:
+          d.role === 'tester'
+            ? 'Project に設定したテストコマンド（ローカル worktree で実行）'
+            : s.config.agentRuntime === 'claude'
+              ? `Claude API（${s.config.claudeModel}）— ローカルリポジトリ未設定の Project はシミュレーション`
+              : 'Claude API（未設定 → ローカルシミュレーション）',
         promptVersion: d.promptVersion,
         toolPolicy: d.toolPolicy,
         version: d.version,

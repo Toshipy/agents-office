@@ -3,12 +3,13 @@
  */
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, api, type AgentDto, type Me } from '../../shared/api/client';
+import { ApiError, api, type AgentDto, type Me, type RuntimeInfo } from '../../shared/api/client';
 import { Icon } from '../../shared/ui/Icon';
 import { AgentStatusPill } from '../../shared/ui/status';
 import { relTime, usd, fmtNum } from '../../shared/ui/format';
 import { toast } from '../../shared/ui/toast';
-import { useMe } from '../../app/App';
+import { LookSwitch, useMe } from '../../app/App';
+import { LOOKS, useLook } from '../../shared/look';
 import { useOffice } from '../../shared/state/office';
 
 interface Usage {
@@ -27,6 +28,8 @@ export function SettingsPage() {
   const usage = useQuery({ queryKey: ['usage'], queryFn: () => api.get<Usage>('/v1/usage'), refetchInterval: 10_000 });
   const audit = useQuery({ queryKey: ['audit'], queryFn: () => api.get<{ items: { id: string; action: string; targetType: string; targetId: string | null; detail: Record<string, unknown>; createdAt: string }[] }>('/v1/audit-logs') });
   const agents = useQuery({ queryKey: ['agents'], queryFn: () => api.get<{ agents: AgentDto[] }>('/v1/agents'), refetchInterval: 5000 });
+  const runtime = useQuery({ queryKey: ['runtime'], queryFn: () => api.get<RuntimeInfo>('/v1/runtime') });
+  const lookId = useLook((s) => s.id);
   const settings = me.data?.workspace.settings;
   const [form, setForm] = useState({ monthlyBudgetUsd: 50, runBudgetUsd: 2, maxConcurrentRuns: 2, demoTraffic: false });
   useEffect(() => {
@@ -178,6 +181,39 @@ export function SettingsPage() {
           ) : (
             <span className="muted">読み込み中…</span>
           )}
+        </section>
+      </div>
+
+      <div className="detail-grid">
+        <section className={`card runtime-card${runtime.data?.runtime === 'claude' ? ' on' : ''}`}>
+          <h3 className="card-title">
+            <Icon name="sparkles" size={15} /> AI 実行基盤
+          </h3>
+          {runtime.data ? (
+            <>
+              <div className="runtime-state">
+                <span className={`runtime-pill ${runtime.data.runtime}`}>{runtime.data.runtime === 'claude' ? 'Claude' : 'シミュレーション'}</span>
+                {runtime.data.runtime === 'claude' ? <span className="mono small">{runtime.data.model} · effort {runtime.data.effort}</span> : null}
+              </div>
+              <p className="small muted">{runtime.data.reason}</p>
+              <p className="small">{runtime.data.note}</p>
+              {runtime.data.runtime === 'claude' ? (
+                <p className="hint">拒否（refusal）時は Anthropic のサーバー側フォールバック（default）で別モデルに切り替わります。費用は API が返したトークン数（実測）から計算します。</p>
+              ) : (
+                <p className="hint">API を起動するシェルで ANTHROPIC_API_KEY を設定し、Projects でローカルリポジトリを指定してください。</p>
+              )}
+            </>
+          ) : (
+            <span className="muted">読み込み中…</span>
+          )}
+        </section>
+        <section className="card">
+          <h3 className="card-title">
+            <Icon name="cube" size={15} /> 見た目
+          </h3>
+          <p className="small muted">採用案は B（Neon Control）です。比較用に A / C にも切り替えられます（このブラウザにだけ保存）。</p>
+          <LookSwitch />
+          <p className="hint">{LOOKS[lookId].tagline}</p>
         </section>
       </div>
 

@@ -222,6 +222,17 @@ export const CreateProjectRequest = z.object({
   color: hexColor.default('#5eead4'),
 });
 
+/** Claude が作業するローカル git リポジトリとテストコマンド（null で解除） */
+export const LocalRepoRequest = z.object({
+  localPath: z.string().trim().min(1).max(500).nullable(),
+  testCommand: z
+    .string()
+    .trim()
+    .max(300)
+    .regex(/^[A-Za-z0-9 _.:\/@=+,&-]*$/, 'テストコマンドに使えない文字が含まれています（シェルの記号は使えません）')
+    .nullable(),
+});
+
 export const UpdateProjectRequest = z
   .object({
     name: z.string().trim().min(1).max(60),
@@ -340,6 +351,8 @@ export interface ProjectViewModel {
   status: 'active' | 'archived';
   repo: {
     fullName: string;
+    /** ローカルリポジトリが設定され Claude で実行されるか */
+    claudeReady: boolean;
     automationEnabled: boolean;
     triggerLabel: string;
     maxRevisionAttempts: number;
@@ -355,6 +368,8 @@ export interface RunSummary {
   status: RunStatus;
   statusVersion: number;
   sourceType: 'manual' | 'github_issue';
+  /** AI 実行基盤（claude / simulated） */
+  runtime: 'claude' | 'simulated';
   issueNumber: number | null;
   prNumber: number | null;
   currentStep: { key: StepKey; role: StepRole; status: StepStatus } | null;

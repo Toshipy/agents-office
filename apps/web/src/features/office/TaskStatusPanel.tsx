@@ -83,6 +83,7 @@ export function TaskStatusPanel({ snapshot }: { snapshot: OfficeState }) {
                   ) : null}
                   {r.prNumber ? <span>Draft PR #{r.prNumber}</span> : null}
                   {r.sourceType === 'github_issue' ? <span>Issue #{r.issueNumber}</span> : null}
+                  {r.runtime === 'claude' ? <span className="runtime-tag">Claude</span> : null}
                   {r.revisionCount > 0 ? <span>rev {r.revisionCount}</span> : null}
                   {r.errorCode ? <span className="err">{r.errorCode}</span> : null}
                 </span>

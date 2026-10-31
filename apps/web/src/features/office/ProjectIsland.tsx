@@ -148,6 +148,11 @@ function IslandImpl({ project, seats, position, focused, anyFocused, zoomedIn, s
             <span className="ic-head">
               <span className="ic-dot" />
               <span className="ic-name">{project.name}</span>
+              {project.repo?.claudeReady ? (
+                <span className="ic-auto ic-claude" title="ローカルリポジトリで Claude が作業します">
+                  CLAUDE
+                </span>
+              ) : null}
               {project.repo?.automationEnabled ? (
                 <span className="ic-auto" title={`自動起動 ON（ラベル ${project.repo.triggerLabel}）`}>
                   AUTO

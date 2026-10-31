@@ -89,6 +89,9 @@ export function RunDetailPage() {
                 {d.project.name}
               </span>
             ) : null}
+            <span className={`runtime-pill ${run.runtime}`} title={run.runtime === 'claude' ? `Claude（${run.model ?? ''}）がローカルリポジトリで実行` : 'ローカルシミュレーション'}>
+              {run.runtime === 'claude' ? `Claude · ${run.model ?? ''}` : 'シミュレーション'}
+            </span>
             <span className="mono faint small">{run.id}</span>
           </div>
           <h1>{run.title}</h1>
@@ -145,11 +148,17 @@ export function RunDetailPage() {
               </dd>
             </div>
           </dl>
-          {run.pr ? <p className="hint">PR はローカル GitHub シミュレーター上の Draft です。マージは人が行います（AI はマージできません）。</p> : null}
+          {run.pr ? (
+            <p className="hint">
+              {run.runtime === 'claude'
+                ? `ローカルリポジトリ（${d.repository?.localPath ?? ''}）のブランチ ${run.branch} に変更があります。確認してから人がマージしてください（AI はマージできません）。`
+                : 'PR はローカル GitHub シミュレーター上の Draft です。マージは人が行います（AI はマージできません）。'}
+            </p>
+          ) : null}
         </section>
         <section className="card">
           <h3 className="card-title">
-            <Icon name="dollar" size={15} /> 利用量（{d.usage.measurement === 'estimated' ? '推定' : d.usage.measurement}）
+            <Icon name="dollar" size={15} /> 利用量（{d.usage.measurement === 'measured' ? '実測トークン' : '推定'}）
           </h3>
           <dl className="kv cols">
             <div>
@@ -169,7 +178,9 @@ export function RunDetailPage() {
               <dd className="mono">{fmtNum(d.usage.outputTokens)}</dd>
             </div>
           </dl>
-          <p className="hint">ローカル版はシミュレーション単価による推定です。</p>
+          <p className="hint">
+            {d.usage.measurement === 'measured' ? 'Claude API が返したトークン数 × 公開単価で計算しています。' : 'シミュレーション単価による推定です（実際のモデル料金ではありません）。'}
+          </p>
         </section>
         <section className="card">
           <h3 className="card-title">

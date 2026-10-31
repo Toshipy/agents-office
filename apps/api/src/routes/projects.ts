@@ -5,6 +5,7 @@ import {
   AutomationPolicyRequest,
   BindRepositoryRequest,
   CreateProjectRequest,
+  LocalRepoRequest,
   RUN_STATUSES,
   TERMINAL_RUN_STATUSES,
   UpdateProjectRequest,
@@ -15,6 +16,7 @@ import { AppError } from '../lib/errors';
 import { newId } from '../lib/ids';
 import { audit } from '../services/audit';
 import { simulatedInstallationId, simulatedRepositoryId } from '../github/simulator';
+import { verifyRepository } from '../agents/claude/git';
 import { auth, ownedProject, parseBody } from './helpers';
 
 const NON_TERMINAL = RUN_STATUSES.filter((x) => !TERMINAL_RUN_STATUSES.includes(x));
@@ -44,6 +46,9 @@ export function registerProjectRoutes(app: Hono<AppEnv>, s: Services) {
             verification: b.verification,
             automationEnabled: b.automationEnabled,
             policy: b.policy,
+            localPath: b.localPath,
+            testCommand: b.testCommand,
+            runtime: s.engine.runtimeFor(b),
           }
         : null,
     };
@@ -185,6 +190,42 @@ export function registerProjectRoutes(app: Hono<AppEnv>, s: Services) {
       .where(and(eq(repositoryBindings.projectId, project.id), eq(repositoryBindings.workspaceId, a.workspaceId)));
     await audit(s.db, { workspaceId: a.workspaceId, actorUserId: a.userId, action: 'repository.disconnected', targetType: 'project', targetId: project.id });
     await s.bus.emit(a.workspaceId, 'project.updated', { action: 'repository_disconnected' }, { projectId: project.id });
+    return c.json(await projectJson(a.workspaceId, project));
+  });
+
+  /** Claude が作業するローカル git リポジトリの設定（ローカル版のみ） */
+  app.put('/v1/projects/:id/local-repo', async (c) => {
+    const a = auth(c);
+    const project = await ownedProject(s, a.workspaceId, c.req.param('id'));
+    const body = await parseBody(c, LocalRepoRequest);
+    const [binding] = await s.db
+      .select()
+      .from(repositoryBindings)
+      .where(and(eq(repositoryBindings.projectId, project.id), eq(repositoryBindings.workspaceId, a.workspaceId)));
+    if (!binding) throw new AppError(422, 'REPO_NOT_CONNECTED', '先に Repo を接続してください');
+    if (await hasOpenRuns(a.workspaceId, project.id)) {
+      throw new AppError(409, 'PROJECT_HAS_OPEN_RUNS', '進行中の Run があるため変更できません');
+    }
+    let localPath: string | null = null;
+    if (body.localPath) {
+      const v = await verifyRepository(body.localPath, s.config.dataRoot);
+      if (!v.ok) throw new AppError(422, 'INVALID_LOCAL_REPO', v.reason);
+      localPath = v.root;
+    }
+    const testCommand = body.testCommand && body.testCommand.length > 0 ? body.testCommand : null;
+    await s.db
+      .update(repositoryBindings)
+      .set({ localPath, testCommand })
+      .where(and(eq(repositoryBindings.id, binding.id), eq(repositoryBindings.workspaceId, a.workspaceId)));
+    await audit(s.db, {
+      workspaceId: a.workspaceId,
+      actorUserId: a.userId,
+      action: 'local_repo.updated',
+      targetType: 'project',
+      targetId: project.id,
+      detail: { localPath, testCommand },
+    });
+    await s.bus.emit(a.workspaceId, 'project.updated', { action: 'local_repo_updated' }, { projectId: project.id });
     return c.json(await projectJson(a.workspaceId, project));
   });
 

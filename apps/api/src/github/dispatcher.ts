@@ -163,6 +163,7 @@ export class Dispatcher {
       issueKey,
       maxRevisionAttempts: binding.policy.maxRevisionAttempts,
       budgetLimitUsd: ws.runBudgetUsd,
+      runtime: this.engine.runtimeFor(binding),
     });
     await this.record(binding, d, true, 'run_created', run.id);
     return 'run_created';

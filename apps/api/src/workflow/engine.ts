@@ -39,7 +39,7 @@ import { digestPayload } from '../lib/crypto';
 import { log } from '../lib/logger';
 import { Mutex } from '../lib/mutex';
 import type { AgentRunner, StepExecutionContext, StepOutput } from '../agents/runner';
-import { RunnerCrashError } from '../agents/runner';
+import { RunnerCrashError, RunnerError } from '../agents/runner';
 import type { ArtifactStore } from './artifactStore';
 import { authorizeTool } from './toolBroker';
 
@@ -176,6 +176,7 @@ export class WorkflowEngine {
     issueKey?: string | null;
     maxRevisionAttempts: number;
     budgetLimitUsd: number;
+    runtime?: 'claude' | 'simulated';
   }): Promise<RunRow> {
     const [run] = await this.db
       .insert(runs)
@@ -186,6 +187,7 @@ export class WorkflowEngine {
         title: args.title,
         request: args.request,
         workflow: 'issue_to_draft_pr',
+        runtime: args.runtime ?? 'simulated',
         source: args.source,
         issueKey: args.issueKey ?? null,
         status: 'queued',
@@ -196,7 +198,7 @@ export class WorkflowEngine {
     await this.bus.emit(
       run.workspaceId,
       'run.created',
-      { title: run.title, status: run.status, source: run.source.type },
+      { title: run.title, status: run.status, source: run.source.type, runtime: run.runtime },
       { runId: run.id, projectId: run.projectId },
     );
     return run;
@@ -250,8 +252,24 @@ export class WorkflowEngine {
         { runId, projectId: row.projectId },
       );
       this.runLocks.delete(runId);
+      void this.cleanupRun(row);
     }
     return row;
+  }
+
+  /** Project の設定から、この Run を Claude で実行するかを決める */
+  runtimeFor(binding: { localPath: string | null } | null | undefined): 'claude' | 'simulated' {
+    return this.config.agentRuntime === 'claude' && binding?.localPath ? 'claude' : 'simulated';
+  }
+
+  private async cleanupRun(run: RunRow) {
+    if (run.runtime !== 'claude' || !this.runner.onRunFinished) return;
+    try {
+      const [binding] = await this.db.select().from(repositoryBindings).where(eq(repositoryBindings.projectId, run.projectId));
+      await this.runner.onRunFinished(run.id, binding?.localPath ?? null, branchFor(run.id));
+    } catch (err) {
+      log.warn('run cleanup failed', { runId: run.id, err: String(err) });
+    }
   }
 
   private async addStep(run: RunRow, key: StepKey, role: StepRole, revision: number): Promise<StepRow> {
@@ -518,12 +536,21 @@ export class WorkflowEngine {
     const previous: Record<string, unknown> = {};
     for (const p of prior) {
       const o = p.outcome ?? {};
-      if (p.key === 'implement') previous.diff = o.diff;
+      if (p.key === 'plan' && o.detail) previous.planDetail = o.detail;
+      if (p.key === 'implement') {
+        previous.diff = o.diff;
+        previous.developerSummary = o.developerSummary;
+        delete previous.lastFailure;
+      }
       if (p.key === 'test') {
         previous.testsPassed = o.passed;
+        previous.testsSkipped = o.skipped === true;
         if (!o.passed) previous.lastFailure = o.failure;
       }
-      if (p.key === 'review' && Array.isArray(o.blockers) && o.blockers.length) previous.lastFailure = o.blockers[0];
+      if (p.key === 'review') {
+        previous.reviewSummary = o.reviewSummary;
+        if (Array.isArray(o.blockers) && o.blockers.length) previous.lastFailure = (o.blockers as string[]).join(' / ');
+      }
     }
     return { step: updated, run: current, binding: binding ?? null, agent, previous };
   }
@@ -573,6 +600,8 @@ export class WorkflowEngine {
       fixLoops: run.fixLoops,
       previous: prepared.previous,
       pr: run.pr ? { number: run.pr.number, url: run.pr.url, branch: run.pr.branch, headSha: run.pr.headSha } : null,
+      runtime: run.runtime,
+      localRepo: binding?.localPath ? { path: binding.localPath, testCommand: binding.testCommand } : null,
       signal,
       log: async (message, kind = 'log') => {
         assertActive();
@@ -635,8 +664,8 @@ export class WorkflowEngine {
         );
         return row;
       },
-      usage: async (model, inputTokens, outputTokens, durationMs) => {
-        const cost = (inputTokens * SIM_PRICE_PER_MTOK.input + outputTokens * SIM_PRICE_PER_MTOK.output) / 1_000_000;
+      usage: async (model, inputTokens, outputTokens, durationMs, extra) => {
+        const cost = extra?.costUsd ?? (inputTokens * SIM_PRICE_PER_MTOK.input + outputTokens * SIM_PRICE_PER_MTOK.output) / 1_000_000;
         await this.db.insert(usageRecords).values({
           id: newId('use'),
           workspaceId: ws,
@@ -647,7 +676,7 @@ export class WorkflowEngine {
           outputTokens,
           durationMs,
           estimatedCostUsd: cost,
-          measurement: 'estimated',
+          measurement: extra?.measurement ?? 'estimated',
         });
         const [updated] = await this.db
           .update(runs)
@@ -681,7 +710,9 @@ export class WorkflowEngine {
       return;
     }
     const code =
-      err instanceof BudgetExceededError
+      err instanceof RunnerError
+        ? err.code
+        : err instanceof BudgetExceededError
         ? 'BUDGET_EXCEEDED'
         : err instanceof StepTimeoutError
           ? 'STEP_TIMEOUT'
@@ -691,7 +722,7 @@ export class WorkflowEngine {
     const message = err instanceof Error ? err.message : String(err);
     const [fresh] = await this.db.select().from(runSteps).where(eq(runSteps.id, step.id));
     const attempt = fresh?.attempt ?? step.attempt;
-    const retryable = code !== 'BUDGET_EXCEEDED' && attempt < step.maxAttempts;
+    const retryable = code !== 'BUDGET_EXCEEDED' && !(err instanceof RunnerError && !err.retryable) && attempt < step.maxAttempts;
     await this.db.insert(stepLogs).values({
       workspaceId: run.workspaceId,
       runId: run.id,
@@ -760,6 +791,17 @@ export class WorkflowEngine {
     const o = step.outcome ?? {};
     switch (step.key) {
       case 'plan': {
+        if (o.needsInput === true && o.reason === 'clarification') {
+          const r = await this.transition(run.id, 'needs_input');
+          if (!r) return;
+          await this.createApproval(r, 'clarification', 'planner', '要件の確認が必要です', {
+            reason: 'requirements_unclear',
+            questions: o.questions,
+            requestExcerpt: run.request.slice(0, 600),
+            note: '回答をコメントに書いて差し戻すと、その内容を踏まえて再計画します。',
+          });
+          return;
+        }
         if (o.needsInput === true) {
           const r = await this.transition(run.id, 'needs_input');
           if (!r) return;

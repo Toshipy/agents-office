@@ -94,6 +94,9 @@ export interface ProjectDto {
     verification: string;
     automationEnabled: boolean;
     policy: AutomationPolicy & { triggerLabel: string };
+    localPath?: string | null;
+    testCommand?: string | null;
+    runtime?: 'claude' | 'simulated';
   } | null;
 }
 
@@ -162,11 +165,12 @@ export interface RunDetail {
     budgetLimitUsd: number;
     pr: { number: number; url: string; branch: string; headSha: string; draft: boolean } | null;
     branch: string;
+    model?: string;
     errorMessage: string | null;
     durationMs: number | null;
   };
   project: { id: string; name: string; color: string } | null;
-  repository: { fullName: string } | null;
+  repository: { fullName: string; localPath?: string | null } | null;
   steps: StepDto[];
   approvals: ApprovalDto[];
   artifacts: ArtifactMeta[];
@@ -186,6 +190,15 @@ export interface AgentDto {
   status: AgentVisualStatus;
   activeRunIds: string[];
   activeProjectIds: string[];
+}
+
+export interface RuntimeInfo {
+  runtime: 'claude' | 'simulated';
+  reason: string;
+  model: string;
+  effort: string;
+  fallbacks: string;
+  note: string;
 }
 
 export type { OfficeState, StepLogLine, WorkspaceEvent, ApprovalDecision };

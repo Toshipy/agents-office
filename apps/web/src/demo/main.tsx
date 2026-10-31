@@ -13,41 +13,23 @@ import '@fontsource-variable/manrope';
 import '../styles.css';
 import { installMockBackend } from './mockBackend';
 import { App } from '../app/App';
-import { LOOKS, LOOK_IDS, useLook } from '../shared/look';
 
 (window as unknown as { __PAW_DEMO__: boolean }).__PAW_DEMO__ = true;
 installMockBackend();
 
 function DemoIntro() {
   const [open, setOpen] = useState(true);
-  const id = useLook((s) => s.id);
-  const setLook = useLook((s) => s.setLook);
-  if (!open) {
-    return (
-      <button className="demo-reopen" onClick={() => setOpen(true)}>
-        デザイン案 {LOOKS[id].label}
-      </button>
-    );
-  }
+  if (!open) return null;
   return (
-    <aside className="demo-intro" aria-label="デザイン案">
+    <aside className="demo-intro compact" aria-label="デモについて">
       <header>
-        <strong>デザイン案を切り替えて比較</strong>
+        <strong>ブラウザ内デモ（デザイン B: Neon Control）</strong>
         <button className="icon-btn" aria-label="閉じる" onClick={() => setOpen(false)}>
           ×
         </button>
       </header>
-      <div className="demo-looks">
-        {LOOK_IDS.map((l) => (
-          <button key={l} className={`demo-look${id === l ? ' on' : ''}`} onClick={() => setLook(l)}>
-            <span className="dl-label">{LOOKS[l].label}</span>
-            <span className="dl-name">{LOOKS[l].name}</span>
-            <span className="dl-tag">{LOOKS[l].tagline}</span>
-          </button>
-        ))}
-      </div>
       <p className="demo-note">
-        このページはブラウザだけで動くデモです。AI の実行と GitHub はシミュレーションで、数秒ごとに Run が進み、Issue が届きます。島やキャラクターをクリックすると詳細が見られます。
+        AI の実行と GitHub はブラウザ内のシミュレーションです。数秒ごとに Run が進み、Issue が届きます。島やキャラクターをクリックすると詳細が見られます。ローカル版では ANTHROPIC_API_KEY を設定すると Claude が実際のリポジトリで作業します。
       </p>
     </aside>
   );

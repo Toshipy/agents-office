@@ -61,9 +61,10 @@ export function registerRunRoutes(app: Hono<AppEnv>, s: Services) {
         source: { type: 'manual', requestedBy: a.userId },
         maxRevisionAttempts: binding.policy.maxRevisionAttempts,
         budgetLimitUsd: ws.runBudgetUsd,
+        runtime: s.engine.runtimeFor(binding),
       });
       await audit(s.db, { workspaceId: a.workspaceId, actorUserId: a.userId, action: 'run.created', targetType: 'run', targetId: run.id, detail: { projectId: project.id } });
-      return { status: 202, body: { runId: run.id, status: run.status, projectId: run.projectId } };
+      return { status: 202, body: { runId: run.id, status: run.status, projectId: run.projectId, runtime: run.runtime } };
     });
   });
 
@@ -135,11 +136,13 @@ export function registerRunRoutes(app: Hono<AppEnv>, s: Services) {
         budgetLimitUsd: run.budgetLimitUsd,
         pr: run.pr,
         branch: branchFor(run.id),
+        runtime: run.runtime,
+        model: run.runtime === 'claude' ? s.config.claudeModel : 'simulated-local',
         errorMessage: run.errorMessage,
         durationMs,
       },
       project: project ? { id: project.id, name: project.name, color: project.color } : null,
-      repository: binding ? { fullName: binding.fullName } : null,
+      repository: binding ? { fullName: binding.fullName, localPath: binding.localPath } : null,
       steps: steps.map((st) => ({
         id: st.id,
         seq: st.seq,
@@ -160,7 +163,7 @@ export function registerRunRoutes(app: Hono<AppEnv>, s: Services) {
       approvals: approvalRows.map((ap) => ({ ...ap, expiresAt: ap.expiresAt.toISOString(), decidedAt: ap.decidedAt?.toISOString() ?? null, createdAt: ap.createdAt.toISOString() })),
       artifacts: artifactRows.map((ar) => ({ id: ar.id, kind: ar.kind, title: ar.title, stepId: ar.stepId, mediaType: ar.mediaType, sizeBytes: ar.sizeBytes, checksum: ar.checksum, createdAt: ar.createdAt.toISOString() })),
       usage: {
-        measurement: 'estimated',
+        measurement: usageRows.length && usageRows.every((u) => u.measurement === 'measured') ? 'measured' : 'estimated',
         inputTokens: usageRows.reduce((x, u) => x + u.inputTokens, 0),
         outputTokens: usageRows.reduce((x, u) => x + u.outputTokens, 0),
         estimatedCostUsd: usageRows.reduce((x, u) => x + u.estimatedCostUsd, 0),

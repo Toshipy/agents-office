@@ -82,7 +82,7 @@ export const LOOKS: Record<LookId, OfficeLook> = {
   neon: {
     id: 'neon',
     label: 'B',
-    name: 'Neon Control',
+    name: 'Neon Control（採用）',
     tagline: '管制室。半透明の島がプロジェクト色に発光し、ロボットが働く。情報量の多い HUD',
     background: '#05070d',
     floor: '#070b14',
@@ -157,19 +157,20 @@ function readLook(): LookId {
   try {
     const h = window.location.hash.replace('#', '');
     if ((LOOK_IDS as string[]).includes(h)) return h as LookId;
-    const v = localStorage.getItem('paw.look');
+    const v = localStorage.getItem('paw.look.v2');
     if (v && (LOOK_IDS as string[]).includes(v)) return v as LookId;
   } catch {
     /* ignore */
   }
-  return 'studio';
+  // 採用案: B Neon Control（A / C は設定画面から比較用に切り替え可能）
+  return 'neon';
 }
 
 export const useLook = create<{ id: LookId; setLook(id: LookId): void }>((set) => ({
   id: readLook(),
   setLook: (id) => {
     try {
-      localStorage.setItem('paw.look', id);
+      localStorage.setItem('paw.look.v2', id);
     } catch {
       /* ignore */
     }

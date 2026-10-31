@@ -114,6 +114,7 @@ export function summarizeRun(run: RunRow, steps: StepRow[]): RunSummary {
     status: run.status,
     statusVersion: run.statusVersion,
     sourceType: run.source.type,
+    runtime: run.runtime,
     issueNumber: run.source.issueNumber ?? null,
     prNumber: run.pr?.number ?? null,
     currentStep: cur ? { key: cur.key, role: cur.role, status: cur.status } : null,
@@ -152,6 +153,7 @@ export async function buildOfficeState(db: Db, engine: WorkflowEngine, workspace
       repo: b
         ? {
             fullName: b.fullName,
+            claudeReady: engine.runtimeFor(b) === 'claude',
             automationEnabled: b.automationEnabled,
             triggerLabel: b.policy.triggerLabel,
             maxRevisionAttempts: b.policy.maxRevisionAttempts,

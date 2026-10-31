@@ -102,6 +102,10 @@ export const repositoryBindings = pgTable(
     policy: jsonb('policy_json').$type<RepoPolicy>().notNull(),
     /** ローカル版は GitHub App の代わりにシミュレーターで検証 */
     verification: text('verification').notNull().default('simulated'),
+    /** ローカルの git リポジトリ（設定すると Claude がこのリポジトリの worktree で作業する） */
+    localPath: text('local_path'),
+    /** Tester が worktree で実行するコマンド（利用者が明示的に設定したものだけ実行） */
+    testCommand: text('test_command'),
     nextPrNumber: integer('next_pr_number').notNull().default(1),
     nextIssueNumber: integer('next_issue_number').notNull().default(1),
     createdAt: ts('created_at').notNull().defaultNow(),
@@ -169,6 +173,8 @@ export const runs = pgTable(
     title: text('title').notNull(),
     request: text('request').notNull(),
     workflow: text('workflow').notNull(),
+    /** AI 実行基盤: claude（Claude API）/ simulated（ローカルシミュレーション） */
+    runtime: text('runtime').$type<'claude' | 'simulated'>().notNull().default('simulated'),
     source: jsonb('source').$type<RunSource>().notNull(),
     /** 同一 Issue に同時に 2 件の開発 Run を起動しないためのキー（要件定義書 5.2） */
     issueKey: text('issue_key'),

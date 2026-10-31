@@ -108,6 +108,9 @@ export function RunListPage() {
                 </td>
                 <td className="small">
                   {r.sourceType === 'github_issue' ? `GitHub Issue #${r.issueNumber}` : '手動'}
+                  <div>
+                    <span className={`runtime-pill ${r.runtime}`}>{r.runtime === 'claude' ? 'Claude' : 'シミュレーション'}</span>
+                  </div>
                   {r.prNumber ? <div className="muted">Draft PR #{r.prNumber}</div> : null}
                 </td>
                 <td className="num mono">{usd(r.costUsd)}</td>

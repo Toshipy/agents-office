@@ -3,9 +3,9 @@
 `docs/` の要求定義書・要件定義書・基本設計書（v0.2）をもとに、**クラウド（AWS）ではなくローカルで動く**ように実装したものです。
 自分専用の 3D オフィスで、複数 Project の AI エージェント（Planner / Developer / Tester / Reviewer）の稼働状況・作業ログ・成果物・承認待ちを確認できます。
 
-> **AI の実行はシミュレーションです。** Claude / OpenAI の各 SDK や GitHub には接続していません。
-> 計画 → 実装 → テスト → レビュー → Draft PR の流れ、ツール呼び出しとポリシー判定、成果物、利用量（推定）を
-> ローカルのシミュレーション Runner が再現します（詳しくは「クラウド版との対応」）。
+> **AI は Claude で動きます。** `ANTHROPIC_API_KEY` を設定し、Project にローカルの git リポジトリを指定すると、
+> Claude（`claude-opus-5-5`）が Run ごとの専用ブランチで計画 → 実装 → テスト → レビュー → Draft PR を進めます（「Claude で実行する」）。
+> キー未設定の場合や、ローカルリポジトリを指定していない Project はシミュレーションで動きます。GitHub への push は未接続です。
 
 Agents Office のソースコード・3D モデル・固有デザイン・名称は使っていません（要求定義書 1.3 / ADR-015）。
 3D のキャラクター・机・島・ハブ・アイコンはすべてこのリポジトリ内のコードで作った独自のものです。
@@ -74,13 +74,53 @@ pnpm typecheck
 
 ### 見た目（デザイン案）
 
-上部バーの **A / B / C** で切り替えられます（選択はブラウザに保存）。どれも同じデータ・同じ画面構成で、見た目だけが変わります。
+**採用案は B（Neon Control）** で、標準の見た目です。比較用に **設定 → 見た目** から A / C にも切り替えられます（選択はブラウザに保存）。
 
 | 案 | 名前 | 特徴 |
 |---|---|---|
 | A | Night Studio | 夜のスタジオ。くすんだパステルの島、木目の机、人型のスタッフ、見出しはセリフ体。動画に最も近い落ち着いた雰囲気 |
 | B | Neon Control | 管制室。半透明の島がプロジェクト色に発光し、ロボットが働く。角ばった HUD 風の文字 |
 | C | Daylight Diorama | 昼の模型。明るい光と柔らかい影、粘土のような丸いキャラクター。ライトテーマ |
+
+## Claude で実行する
+
+1. API を起動するシェルで Claude の API キーを設定します（または `ant auth login` のプロファイル）。
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+```bash
+pnpm dev
+```
+
+2. **Projects** で、対象 Project の「Claude が作業するローカルリポジトリ」に git リポジトリの絶対パスを入れて保存します。テストコマンド（例: `pnpm install --frozen-lockfile && pnpm test`）は任意です。
+3. Office の右パネルからその Project にタスクを依頼します。島のカードに **CLAUDE**、Run に **Claude · claude-opus-5-5** と表示されます。
+4. Draft PR ができたら、リポジトリの `ai/run-…` ブランチを確認し、良ければ **人が** マージします。承認画面の Approve でその Run は完了になります（自動マージはしません）。
+
+| 役割 | Claude の使い方 |
+|---|---|
+| Planner | Messages API の構造化出力で計画（進め方・変更予定ファイル・受入条件・リスク・要確認事項）を返す。要件が曖昧なら「判断が必要」で停止 |
+| Developer | Messages API のツール呼び出しループ。使えるツールは `list_files` / `read_file` / `search_code` / `write_file` / `edit_file` のみで、すべて Tool Broker のポリシー判定と worktree 内へのパス制限を通る |
+| Tester | Claude は使わず、Project に設定したテストコマンドを worktree で実行（シェルを介さない・秘密値の環境変数は渡さない） |
+| Reviewer | Messages API の構造化出力で受入条件との照合・blocker・nit を返す。blocker があれば Developer に差し戻す（AI の判定は人の承認の代わりにならない） |
+
+安全のための制限:
+- 作業は Run ごとの git worktree（`.data/worktrees/<run>`、ブランチ `ai/run-…`）の中だけ。リポジトリ外・`.git`・`node_modules`・秘密情報らしいファイル（`.env`, `*.pem` など）・CI 設定や git フックは読み書きできません。Developer はシェルを実行できません。
+- 依頼本文・Issue・リポジトリの内容は非信頼入力として区切って渡し、その中の指示ではツールや権限は変わりません。
+- テストコマンドはあなたのマシンでそのまま実行されます（コンテナ隔離はローカル版では未実装）。信頼できるリポジトリにだけ設定してください。Developer が書いたコードやパッケージのスクリプトもテスト時に実行されます。
+- Run・月の予算、同時実行数、キルスイッチは Claude 実行にも適用されます。費用は API が返したトークン数（実測）× 公開単価で記録し、Run 予算を超えた時点で停止します。Claude の作業は既定の Run 予算（$2）を超えることがあるので、設定で調整してください。
+- Claude が応答を拒否した場合（refusal）は再試行せず失敗にします。Anthropic のサーバー側フォールバック（`fallbacks: "default"`）を有効にしているため、拒否時は Anthropic が別モデルでの再実行を試みます。
+- 変更の無かった Run のブランチは片付け、コミットのあるブランチはレビューのため残します。
+
+環境変数:
+
+| 変数 | 既定値 | 内容 |
+|---|---|---|
+| `PAW_AGENT_RUNTIME` | `auto` | `auto`（API キーがあれば Claude）/ `claude` / `simulated` |
+| `PAW_CLAUDE_MODEL` | `claude-opus-5-5` | 使用するモデル |
+| `PAW_CLAUDE_EFFORT` | `high` | `low` / `medium` / `high` / `xhigh` / `max` |
+| `PAW_TEST_TIMEOUT_MS` | `600000` | テストコマンドのタイムアウト |
 
 ### ブラウザだけで動くデモ
 
@@ -146,7 +186,7 @@ pnpm webhook:send -- --repo alice/storefront-web --installation <ID> --title "CS
 | Step Functions Standard | `WorkflowEngine`（プロセス内・DB 永続） | 遷移表どおりの状態遷移、楽観ロック、再試行・タイムアウト・予算・同時実行数、再起動時の復旧 |
 | API Gateway + Lambda（Webhook 検証） | `POST /integrations/github/webhook` | raw body の HMAC-SHA256 を定数時間比較、サイズ・ヘッダー検証 |
 | SQS + DLQ / Lambda Dispatcher | `webhook_deliveries` テーブル（永続キュー）+ `Dispatcher` | `provider + delivery_id` の一意制約で冪等化。5 回失敗で dead_letter |
-| ECS Fargate + AI 実行基盤（候補: Claude Agent SDK・Claude Code / OpenAI Agents SDK・Codex SDK） | `SimulatedRunner` | `AgentRunner` インターフェースで差し替え可能（`apps/api/src/agents/runner.ts`） |
+| ECS Fargate + OpenAI Agents SDK / Codex SDK | `ClaudeRunner`（Claude API・`@anthropic-ai/sdk`）+ Run ごとの git worktree。キー未設定・ローカルリポジトリ未指定時は `SimulatedRunner` | `apps/api/src/agents/claude/`。コンテナ隔離は未実装 |
 | GitHub App / Tool Broker | GitHub シミュレーター + `authorizeTool` | 本番と同じ署名付き Webhook 経路。Tool Broker は接続 Repo・`ai/` ブランチ・Draft のみ許可、マージ・Secrets 等は常に拒否 |
 | S3 Artifacts | `.data/artifacts/workspaces/<ws>/runs/<run>/…` | 取得は API で所有権確認後のみ。sha256 チェックサムを検証 |
 | SSE / ポーリング | 同じ | `GET /v1/events/stream`（Last-Event-ID で差分再送）、失敗時は 3 秒ポーリングに切替 |
@@ -181,6 +221,9 @@ docs/           要求定義書・要件定義書・基本設計書
 | AT-010 | Runner の異常終了・テスト失敗の再試行に上限、Run 予算超過で停止、月間予算超過で新規 Run を拒否 |
 | その他 | FR-001（未認証 401）、CSRF、同時実行数、中止とキルスイッチ、Idempotency-Key、プロセス再起動からの復旧、イベント連番、シミュレーター経由の Workspace 越境防止 |
 
+`apps/api/src/claude.test.ts`（Claude 実行基盤）: Claude API の代わりに台本どおり応答する偽クライアントを注入し、一時ディレクトリの実 git リポジトリで検証します。
+ローカルリポジトリの検証、worktree 外・秘密ファイル・CI 設定へのアクセス拒否、`ai/` ブランチへのコミット、構造化出力・フォールバック設定、実測トークンによる費用、refusal と SDK エラーを再試行しないこと、要件確認からの再計画、変更の無い Run のブランチ片付けを確認しています。**実際の Claude API への接続は、この開発環境に API キーが無いため未確認です。**
+
 `packages/office-model` には 3D 表示状態の投影ロジックの単体テストがあります。
 
 ---
@@ -193,20 +236,21 @@ docs/           要求定義書・要件定義書・基本設計書
 - **Draft PR のレビュー**: 仕様どおり GitHub 側で行う前提のため、承認 API では受け付けません（409）。ローカルでは承認画面のボタンが GitHub シミュレーター経由で署名付きレビュー Webhook を送ります。
 - **Repo 未接続の Project には依頼できません**（Draft PR を作れないため 422）。
 - **同時実行数の既定値**は新規ワークスペースで 2（NFR-018 の例）。デモの alice は見栄えのため 4、予算は $200。
-- **費用はシミュレーション単価による推定値**（$3 / $12 per 1M tokens）で、実際のモデル料金ではありません。
+- **AI 実行基盤は Claude を採用**（仕様書の OpenAI Agents SDK / Codex SDK の代わり）。Developer は Claude Agent SDK ではなく Messages API のツール呼び出しで実装しました。ファイル操作を 1 回ずつ Tool Broker で判定できるためです。
+- シミュレーション Run の費用はシミュレーション単価（$3 / $12 per 1M tokens）による推定値です。Claude Run は実測トークン × 公開単価です。
 - Installation ID / Repository ID はローカルで擬似的に採番しています（実 GitHub とは異なり、同じ Repo を 2 人が接続しても Installation は別扱い）。
 
 ## 未実装（P1 / P2 またはクラウド前提のもの）
 
-- AI 実行基盤（Claude Agent SDK・Claude Code / OpenAI Agents SDK・Codex SDK）と GitHub App への実接続（Runner インターフェースのみ用意）
+- GitHub App への実接続（Draft PR はローカルブランチとして作成。GitHub への push・PR 作成は未接続）
+- Runner のコンテナ隔離（テストコマンドはローカルで直接実行）
 - 運用者向けの障害・遅延通知（FR-057）、ログ保持期間の設定（UI-07 の一部）、データのエクスポート・削除（FR-058）
 - P1: 文書・連絡 Agent、Slack / Gmail / Drive 連携、定期タスク。P2: チーム共有、ナレッジグラフ
-- Runner のコンテナ隔離・ネットワーク制限（シミュレーションのため対象外）
 
 ## 確認したいこと
 
-- AI 実行基盤は Claude（Claude Agent SDK / Claude Code）と OpenAI（Agents SDK / Codex SDK）を候補として両方に対応できる形にしています。最初に実接続するのはどちらにするか、API キーはサーバー管理で良いか。
-- デザイン案 A / B / C のどれをベースにするか（組み合わせも可。例: A の配色に B のキャラクター）。
+- Claude の実行は、この開発環境に API キーが無いため、台本どおりに応答する偽クライアントでのテストまでしか確認できていません。お手元でキーを設定して 1 件試していただけますか。
+- 次に GitHub への実接続（push と Draft PR 作成）を進めてよいか。
 - ローカル版で次に本物にしたい部分の優先順位（例: 実 GitHub App 連携 → 実 Runner → Cognito）。
 - 自動起動の条件は `ai:ready` ラベル方式（O-04 の仮置き）で確定して良いか。
 - 承認待ちの期限（現在: Draft PR 14 日、危険操作・判断待ち 72 時間）と、期限切れ時の扱い（現在: 失効させて再確認を作成）で良いか。

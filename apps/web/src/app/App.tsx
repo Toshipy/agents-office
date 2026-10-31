@@ -178,7 +178,6 @@ function Shell({ me }: { me: Me }) {
           </NavLink>
         </nav>
         <div className="top-right">
-          <LookSwitch />
           {paused ? (
             <span className="paused-badge" title="キルスイッチで新規 Run の開始を停止中">
               <Icon name="pause" size={12} /> 停止中

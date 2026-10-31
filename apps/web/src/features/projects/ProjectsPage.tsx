@@ -112,6 +112,8 @@ function ProjectCard({ project: p, onChange }: { project: ProjectDto; onChange()
   const [label, setLabel] = useState(p.repository?.policy.triggerLabel ?? 'ai:ready');
   const [maxRev, setMaxRev] = useState(p.repository?.policy.maxRevisionAttempts ?? 3);
   const [sim, setSim] = useState(false);
+  const [localPath, setLocalPath] = useState(p.repository?.localPath ?? '');
+  const [testCommand, setTestCommand] = useState(p.repository?.testCommand ?? '');
   const devRoutes = useAuthConfig().data?.devRoutes ?? false;
 
   const act = async (fn: () => Promise<unknown>, ok: string) => {
@@ -185,6 +187,42 @@ function ProjectCard({ project: p, onChange }: { project: ProjectDto; onChange()
           </div>
         )}
       </div>
+
+      {p.repository ? (
+        <div className="pa-section">
+          <h4>
+            <Icon name="sparkles" size={14} /> Claude が作業するローカルリポジトリ
+            <span className={`runtime-pill ${p.repository.runtime ?? 'simulated'}`}>{p.repository.runtime === 'claude' ? 'Claude で実行' : 'シミュレーション'}</span>
+          </h4>
+          <div className="form-grid">
+            <label className="span-2">
+              git リポジトリの絶対パス
+              <input className="mono" value={localPath} onChange={(e) => setLocalPath(e.target.value)} placeholder="/Users/you/src/my-app" />
+            </label>
+            <label className="span-2">
+              テストコマンド（任意・&& で連結可、シェル記号は不可）
+              <input className="mono" value={testCommand} onChange={(e) => setTestCommand(e.target.value)} placeholder="pnpm install --frozen-lockfile && pnpm test" />
+            </label>
+          </div>
+          <div className="form-actions">
+            {p.repository.localPath ? (
+              <button className="btn ghost small" onClick={() => void act(() => api.put(`/v1/projects/${p.id}/local-repo`, { localPath: null, testCommand: null }), 'ローカルリポジトリの設定を解除しました')}>
+                解除
+              </button>
+            ) : null}
+            <button
+              className="btn small primary"
+              disabled={!localPath.trim()}
+              onClick={() => void act(() => api.put(`/v1/projects/${p.id}/local-repo`, { localPath: localPath.trim(), testCommand: testCommand.trim() || null }), 'ローカルリポジトリを設定しました')}
+            >
+              保存
+            </button>
+          </div>
+          <p className="hint">
+            Run ごとに <span className="mono">ai/run-…</span> ブランチの worktree を作り、Claude はその中のファイルだけを読み書きします（.git・CI 設定・秘密ファイルは不可、シェル実行不可）。テストコマンドはあなたのマシンで実行されるため、信頼できるリポジトリにだけ設定してください。マージは人が行います。
+          </p>
+        </div>
+      ) : null}
 
       {p.repository ? (
         <div className="pa-section">

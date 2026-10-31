@@ -734,6 +734,7 @@ class DemoServer {
       status: r.status,
       statusVersion: r.statusVersion,
       sourceType: r.source.type,
+      runtime: 'simulated',
       issueNumber: r.source.issueNumber ?? null,
       prNumber: r.pr?.number ?? null,
       currentStep: cur ? { key: cur.key, role: cur.role, status: cur.status } : null,
@@ -768,7 +769,7 @@ class DemoServer {
         color: p.color,
         position: p.position,
         status: 'active' as const,
-        repo: { fullName: p.repo, automationEnabled: p.automation, triggerLabel: p.triggerLabel, maxRevisionAttempts: p.maxRevisionAttempts, events: ['issues.opened', 'issues.labeled'] },
+        repo: { fullName: p.repo, claudeReady: false, automationEnabled: p.automation, triggerLabel: p.triggerLabel, maxRevisionAttempts: p.maxRevisionAttempts, events: ['issues.opened', 'issues.labeled'] },
         stats: buildProjectStats(input, p.id),
       })),
       seats: buildSeats(input) as SeatViewModel[],
@@ -841,6 +842,9 @@ class DemoServer {
     if (method === 'GET' && path === '/v1/auth/config') return [200, { mode: 'demo', devRoutes: true, devAccounts: [] }];
     if (method === 'POST' && path === '/v1/auth/logout') return [200, { ok: true }];
     if (method === 'GET' && path === '/v1/me') return [200, { user: USER, workspace: this.wsJson() }];
+    if (method === 'GET' && path === '/v1/runtime') {
+      return [200, { runtime: 'simulated', reason: 'ブラウザ内デモのためシミュレーションです', model: 'claude-opus-5-5', effort: 'high', fallbacks: 'default', note: 'ローカル版で ANTHROPIC_API_KEY を設定し、Project にローカルリポジトリを指定すると Claude が作業します。' }];
+    }
     if (method === 'GET' && path === '/v1/workspaces/me') return [200, this.wsJson()];
     if (method === 'GET' && path === '/v1/workspaces/me/office-state') return [200, this.officeState()];
     if (method === 'GET' && path === '/v1/events') {
