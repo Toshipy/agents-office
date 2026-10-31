@@ -4,6 +4,7 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api, type ProjectDto } from '../../shared/api/client';
+import { useAuthConfig } from '../../shared/api/authConfig';
 import { Icon } from '../../shared/ui/Icon';
 import { toast } from '../../shared/ui/toast';
 
@@ -111,6 +112,7 @@ function ProjectCard({ project: p, onChange }: { project: ProjectDto; onChange()
   const [label, setLabel] = useState(p.repository?.policy.triggerLabel ?? 'ai:ready');
   const [maxRev, setMaxRev] = useState(p.repository?.policy.maxRevisionAttempts ?? 3);
   const [sim, setSim] = useState(false);
+  const devRoutes = useAuthConfig().data?.devRoutes ?? false;
 
   const act = async (fn: () => Promise<unknown>, ok: string) => {
     try {
@@ -213,10 +215,12 @@ function ProjectCard({ project: p, onChange }: { project: ProjectDto; onChange()
             </button>
           </div>
           <p className="hint">対象: issues.opened / issues.labeled のうち、ラベル「{p.repository.policy.triggerLabel}」が付いた Issue のみ。条件不一致は記録だけ残し、Run は作りません。</p>
-          <button className="btn ghost small" onClick={() => setSim((v) => !v)}>
-            <Icon name="send" size={13} /> GitHub シミュレーターで Issue を送る
-          </button>
-          {sim ? <IssueSimulator project={p} /> : null}
+          {devRoutes ? (
+            <button className="btn ghost small" onClick={() => setSim((v) => !v)}>
+              <Icon name="send" size={13} /> GitHub シミュレーターで Issue を送る
+            </button>
+          ) : null}
+          {sim && devRoutes ? <IssueSimulator project={p} /> : null}
         </div>
       ) : null}
     </section>

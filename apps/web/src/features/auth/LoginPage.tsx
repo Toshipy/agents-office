@@ -2,18 +2,14 @@
  * ログイン / 初期セットアップ（UI-01）。ローカル版は Cognito の代わりにローカル認証。
  */
 import { useState, type FormEvent } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { ApiError, api } from '../../shared/api/client';
+import { useAuthConfig } from '../../shared/api/authConfig';
 import { Icon } from '../../shared/ui/Icon';
-
-interface AuthConfig {
-  mode: string;
-  devAccounts: { username: string; password: string; displayName: string }[];
-}
 
 export function LoginPage() {
   const qc = useQueryClient();
-  const cfg = useQuery({ queryKey: ['auth-config'], queryFn: () => api.get<AuthConfig>('/v1/auth/config') });
+  const cfg = useAuthConfig();
   const [mode, setMode] = useState<'login' | 'signup'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');

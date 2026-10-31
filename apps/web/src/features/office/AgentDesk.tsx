@@ -186,4 +186,23 @@ function AgentDeskImpl({ seat, position, detail, selected, dimmed, lowPower, pha
   );
 }
 
-export const AgentDesk = memo(AgentDeskImpl);
+/** スナップショット再取得のたびに全席を再描画しないよう、表示に効く値だけ比較する */
+function sameProps(a: Props, b: Props) {
+  return (
+    a.seat.key === b.seat.key &&
+    a.seat.status === b.seat.status &&
+    a.seat.name === b.seat.name &&
+    a.seat.role === b.seat.role &&
+    a.detail === b.detail &&
+    a.selected === b.selected &&
+    a.dimmed === b.dimmed &&
+    a.lowPower === b.lowPower &&
+    a.phase === b.phase &&
+    a.onSelect === b.onSelect &&
+    a.position[0] === b.position[0] &&
+    a.position[1] === b.position[1] &&
+    a.position[2] === b.position[2]
+  );
+}
+
+export const AgentDesk = memo(AgentDeskImpl, sameProps);

@@ -121,7 +121,7 @@ export function OfficeCanvas({ snapshot, viewport }: { snapshot: OfficeState; vi
     <HtmlPortalContext.Provider value={overlay}>
     <Canvas
       orthographic
-      shadows={lowPower ? false : 'soft'}
+      shadows={lowPower ? false : 'percentage'}
       dpr={lowPower ? 1 : [1, 2]}
       frameloop={hidden ? 'never' : 'always'}
       camera={{ position: CAMERA_OFFSET.toArray() as [number, number, number], zoom: 14, near: 0.1, far: 500 }}

@@ -196,6 +196,7 @@ export async function buildOfficeState(db: Db, engine: WorkflowEngine, workspace
       completed24h: visibleRuns.filter((r) => r.status === 'completed' && (r.finishedAt?.getTime() ?? 0) >= since.getTime()).length,
       webhooks24h: Number(webhooks),
       paused: ws.paused,
+      budgetExceeded: monthCost >= ws.monthlyBudgetUsd,
     },
     runs: visibleRuns.slice(0, 120).map((r) => summarizeRun(r, stepRows)),
     approvalsPending: approvalRows.length,

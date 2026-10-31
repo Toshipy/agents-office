@@ -1011,7 +1011,8 @@ export class WorkflowEngine {
         });
         const [run] = await this.db.select().from(runs).where(eq(runs.id, row.runId));
         if (run && (run.status === 'waiting_review' || run.status === 'needs_input')) {
-          await this.createApproval(run, row.actionType, row.requestedByRole, `${row.title}（再確認）`, {
+          const baseTitle = row.title.replace(/（再確認）$/, '');
+          await this.createApproval(run, row.actionType, row.requestedByRole, `${baseTitle}（再確認）`, {
             ...row.payload,
             reconfirmationOf: row.id,
           });

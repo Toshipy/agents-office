@@ -8,6 +8,7 @@ import { Link } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { APPROVAL_TYPE_LABEL, ROLE_LABEL, type AgentRole } from '@paw/contracts';
 import { ApiError, api, newIdempotencyKey, type ApprovalDto } from '../../shared/api/client';
+import { useAuthConfig } from '../../shared/api/authConfig';
 import { Icon } from '../../shared/ui/Icon';
 import { Modal } from '../../shared/ui/content';
 import { RunStatusPill } from '../../shared/ui/status';
@@ -33,6 +34,7 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
   const [busy, setBusy] = useState(false);
   const pending = a.status === 'pending';
   const p = a.payload;
+  const devRoutes = useAuthConfig().data?.devRoutes ?? false;
 
   const submit = async () => {
     if (!action) return;
@@ -141,7 +143,9 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
 
       {pending ? (
         <footer className="ap-actions">
-          {a.actionType === 'pr_review' ? (
+          {a.actionType === 'pr_review' && !devRoutes ? (
+            <span className="muted small">GitHub 上でレビューしてください（レビューイベントを受信すると反映されます）</span>
+          ) : a.actionType === 'pr_review' ? (
             <>
               <span className="muted small">GitHub シミュレーター:</span>
               <button className="btn primary" onClick={() => setAction({ kind: 'review', state: 'approved' })}>

@@ -79,6 +79,11 @@ function Overview({ snapshot }: { snapshot: OfficeState }) {
             <span style={{ width: `${Math.max(2, pct * 100)}%` }} />
           </div>
           <span className="hint">シミュレーション単価による推定値</span>
+          {hub.budgetExceeded ? (
+            <Link to="/settings" className="wait-banner danger-banner">
+              <Icon name="dollar" size={14} /> 予算上限に到達。待機中の Run は開始されません <Icon name="chevron-right" size={14} />
+            </Link>
+          ) : null}
         </div>
       </div>
       <div className="section-title">PROJECTS</div>

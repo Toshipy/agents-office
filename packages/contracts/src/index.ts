@@ -375,6 +375,8 @@ export interface HubViewModel {
   completed24h: number;
   webhooks24h: number;
   paused: boolean;
+  /** 月間予算に到達し、新規 Run の開始を保留中 */
+  budgetExceeded: boolean;
 }
 
 export interface WorkspaceSettings {

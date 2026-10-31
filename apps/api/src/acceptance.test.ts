@@ -291,6 +291,26 @@ describe('AT-004 / AT-005 webhooks', () => {
   });
 });
 
+describe('simulator isolation', () => {
+  it('does not let another workspace redeliver a delivery even when the repo name matches', async () => {
+    const alice = await signup('rdA');
+    const bob = await signup('rdB');
+    const shared = 'shared-org/shared-repo';
+    const a = await setupProject(alice, { automation: true, repo: shared });
+    await setupProject(bob, { automation: true, repo: shared });
+    const sent = await alice.json('POST', '/v1/dev/github/simulate', { kind: 'issue', projectId: a.projectId, title: '共有 Repo の Issue', labels: ['ai:ready'] });
+    expect(sent.status).toBe(200);
+    const byBob = await bob.json('POST', '/v1/dev/github/simulate', { kind: 'redeliver', deliveryId: sent.body.deliveryId });
+    expect(byBob.status).toBe(404);
+    const byAlice = await alice.json('POST', '/v1/dev/github/simulate', { kind: 'redeliver', deliveryId: sent.body.deliveryId });
+    expect(byAlice.body.body.status).toBe('duplicate');
+    // Bob の Workspace には Run が作られない（Installation が異なる）
+    await s.dispatcher.drain();
+    const bobRuns = await s.db.select().from(runs).where(eq(runs.workspaceId, bob.workspaceId));
+    expect(bobRuns).toHaveLength(0);
+  });
+});
+
 describe('AT-008 approvals', () => {
   it('rejects other users, stale versions, mismatched digests and forbidden approvals', async () => {
     const alice = await signup('apA');

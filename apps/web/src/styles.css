@@ -880,6 +880,11 @@ label.check {
 .wait-banner:hover {
   background: rgba(251, 191, 36, 0.2);
 }
+.danger-banner {
+  color: #fecaca;
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.45);
+}
 .ok-banner {
   color: var(--s-working);
   background: rgba(52, 211, 153, 0.08);

@@ -15,6 +15,7 @@ export function registerAuthRoutes(app: Hono<AppEnv>, s: Services) {
   app.get('/v1/auth/config', (c) =>
     c.json({
       mode: 'local',
+      devRoutes: s.config.enableDevRoutes,
       devAccounts: s.config.enableDevRoutes && s.config.seedDemo ? DEMO_ACCOUNTS.map(({ username, password, displayName }) => ({ username, password, displayName })) : [],
     }),
   );

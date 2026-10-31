@@ -80,6 +80,7 @@ export function HubCore({ hub, lowPower }: { hub: HubViewModel; lowPower: boolea
             <Icon name={hub.paused ? 'pause' : 'webhook'} size={12} /> DISPATCH HUB
           </span>
           {hub.paused ? <span className="hub-paused">キルスイッチで停止中</span> : null}
+          {hub.budgetExceeded ? <span className="hub-paused">月間予算に到達 — 新規開始を保留中</span> : null}
           <span className="hub-stats">
             <span>
               待機 <b>{hub.queued}</b>

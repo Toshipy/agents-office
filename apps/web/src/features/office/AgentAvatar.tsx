@@ -3,7 +3,7 @@
  * 丸いバイザーの小型ロボット。役割色のボディと、背中の状態ランプで状態を示す。
  * アニメーションは「実行中」を表すだけで、業務の成功を保証しない（基本設計書 5.2）。
  */
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { RoundedBox } from '@react-three/drei';
 import * as THREE from 'three';
@@ -45,6 +45,7 @@ export function AgentAvatar({ roleColor, status, phase, lowPower }: Props) {
     () => new THREE.MeshStandardMaterial({ color: '#0b1220', emissive: '#cbd5e1', emissiveIntensity: 1.5, toneMapped: false }),
     [],
   );
+  useEffect(() => () => eyeMaterial.dispose(), [eyeMaterial]);
 
   useFrame((state) => {
     const t = state.clock.elapsedTime + phase;

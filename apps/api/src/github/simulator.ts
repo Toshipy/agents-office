@@ -123,11 +123,17 @@ export async function redeliver(db: Db, config: AppConfig, args: { workspaceId: 
     .select()
     .from(webhookDeliveries)
     .where(and(eq(webhookDeliveries.provider, 'github'), eq(webhookDeliveries.deliveryId, args.deliveryId)));
-  if (!d || d.repositoryId == null) throw notFound('Delivery');
+  if (!d || d.repositoryId == null || d.installationId == null) throw notFound('Delivery');
   const [owned] = await db
     .select({ id: repositoryBindings.id })
     .from(repositoryBindings)
-    .where(and(eq(repositoryBindings.workspaceId, args.workspaceId), eq(repositoryBindings.repositoryId, d.repositoryId)));
+    .where(
+      and(
+        eq(repositoryBindings.workspaceId, args.workspaceId),
+        eq(repositoryBindings.installationId, d.installationId),
+        eq(repositoryBindings.repositoryId, d.repositoryId),
+      ),
+    );
   if (!owned) throw notFound('Delivery');
   return deliver(db, config, d.eventType, d.payload, d.deliveryId);
 }
