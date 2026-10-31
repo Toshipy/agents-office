@@ -9,10 +9,10 @@ import { SIM_MODEL } from '../agents/simulated';
 import { DEFAULT_TOOL_POLICIES } from '../workflow/toolBroker';
 
 export const DEFAULT_AGENTS: { role: AgentRole; name: string; runtime: string }[] = [
-  { role: 'planner', name: 'Sora', runtime: 'OpenAI Agents SDK（未接続 → ローカルシミュレーション）' },
-  { role: 'developer', name: 'Ren', runtime: 'Codex SDK（未接続 → ローカルシミュレーション）' },
-  { role: 'tester', name: 'Mio', runtime: 'Codex SDK / 検証コマンド（未接続 → ローカルシミュレーション）' },
-  { role: 'reviewer', name: 'Kei', runtime: 'OpenAI Agents SDK（未接続 → ローカルシミュレーション）' },
+  { role: 'planner', name: 'Sora', runtime: 'Claude Agent SDK / OpenAI Agents SDK（候補・未接続 → ローカルシミュレーション）' },
+  { role: 'developer', name: 'Ren', runtime: 'Claude Code / Codex SDK（候補・未接続 → ローカルシミュレーション）' },
+  { role: 'tester', name: 'Mio', runtime: '検証コマンド（未接続 → ローカルシミュレーション）' },
+  { role: 'reviewer', name: 'Kei', runtime: 'Claude Agent SDK / OpenAI Agents SDK（候補・未接続 → ローカルシミュレーション）' },
 ];
 
 /** FR-002: 新規登録時に個人 Workspace と既定の Agent 定義を作成 */

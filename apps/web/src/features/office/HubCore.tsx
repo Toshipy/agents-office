@@ -9,15 +9,17 @@ import type { HubViewModel } from '@paw/contracts';
 import { HUB_RADIUS } from './layout';
 import { Icon } from '../../shared/ui/Icon';
 import { useHtmlPortal } from './htmlPortal';
+import { useOfficeLook } from '../../shared/look';
 
 export function HubCore({ hub, lowPower }: { hub: HubViewModel; lowPower: boolean }) {
   const portal = useHtmlPortal();
+  const look = useOfficeLook();
   const core = useRef<THREE.Group>(null);
   const ico = useRef<THREE.Mesh>(null);
   const ring1 = useRef<THREE.Mesh>(null);
   const ring2 = useRef<THREE.Mesh>(null);
   const orb = useRef<THREE.MeshStandardMaterial>(null);
-  const accent = hub.paused ? '#f87171' : '#8b9cff';
+  const accent = hub.paused ? '#f87171' : look.hub.accent;
   const busy = hub.active > 0;
 
   useFrame((state, dt) => {
@@ -37,11 +39,11 @@ export function HubCore({ hub, lowPower }: { hub: HubViewModel; lowPower: boolea
     <group>
       <mesh position={[0, -0.3, 0]} receiveShadow castShadow>
         <cylinderGeometry args={[HUB_RADIUS, HUB_RADIUS + 0.25, 0.6, 64]} />
-        <meshStandardMaterial color="#151b2b" roughness={0.6} metalness={0.2} />
+        <meshStandardMaterial color={look.hub.base} roughness={0.6} metalness={0.2} />
       </mesh>
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.011, 0]} receiveShadow>
         <circleGeometry args={[HUB_RADIUS - 0.15, 64]} />
-        <meshStandardMaterial color="#1b2236" roughness={0.8} />
+        <meshStandardMaterial color={look.hub.top} roughness={0.8} />
       </mesh>
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
         <ringGeometry args={[HUB_RADIUS - 0.35, HUB_RADIUS - 0.22, 96]} />
@@ -54,7 +56,7 @@ export function HubCore({ hub, lowPower }: { hub: HubViewModel; lowPower: boolea
       {/* 台座 */}
       <mesh position={[0, 0.25, 0]} castShadow>
         <cylinderGeometry args={[0.55, 0.8, 0.5, 6]} />
-        <meshStandardMaterial color="#232b40" roughness={0.5} metalness={0.3} />
+        <meshStandardMaterial color={look.hub.pedestal} roughness={0.5} metalness={0.3} />
       </mesh>
       <group ref={core} position={[0, 2.1, 0]}>
         <mesh ref={ico} castShadow={!lowPower}>
@@ -63,11 +65,11 @@ export function HubCore({ hub, lowPower }: { hub: HubViewModel; lowPower: boolea
         </mesh>
         <mesh>
           <sphereGeometry args={[0.42, 32, 32]} />
-          <meshStandardMaterial ref={orb} color="#0b1020" emissive={accent} emissiveIntensity={1.4} toneMapped={false} />
+          <meshStandardMaterial ref={orb} color={look.id === 'daylight' ? '#ffffff' : '#0b1020'} emissive={accent} emissiveIntensity={1.4} toneMapped={false} />
         </mesh>
         <mesh ref={ring1} rotation={[Math.PI / 2.4, 0, 0]}>
           <torusGeometry args={[1.35, 0.02, 8, 96]} />
-          <meshBasicMaterial color="#5eead4" toneMapped={false} />
+          <meshBasicMaterial color={look.hub.ring2} toneMapped={false} />
         </mesh>
         <mesh ref={ring2} rotation={[0, 0, Math.PI / 3]}>
           <torusGeometry args={[1.55, 0.015, 8, 96]} />

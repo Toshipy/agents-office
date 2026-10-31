@@ -7,6 +7,7 @@ import { useOffice } from '../shared/state/office';
 import { Icon } from '../shared/ui/Icon';
 import { Toaster } from '../shared/ui/toast';
 import { clockTime, usd } from '../shared/ui/format';
+import { LOOKS, LOOK_IDS, useLook } from '../shared/look';
 import { LoginPage } from '../features/auth/LoginPage';
 import { OfficePage } from '../features/office/OfficePage';
 import { RunListPage } from '../features/runs/RunListPage';
@@ -31,7 +32,30 @@ export function useMe() {
   });
 }
 
+export function LookSwitch() {
+  const id = useLook((s) => s.id);
+  const setLook = useLook((s) => s.setLook);
+  return (
+    <div className="look-switch" role="radiogroup" aria-label="デザイン案">
+      {LOOK_IDS.map((l) => (
+        <button key={l} role="radio" aria-checked={id === l} className={id === l ? 'on' : ''} title={`${LOOKS[l].name} — ${LOOKS[l].tagline}`} onClick={() => setLook(l)}>
+          <b>{LOOKS[l].label}</b>
+          <span className="ln"> {LOOKS[l].name}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function useApplyLook() {
+  const id = useLook((s) => s.id);
+  useEffect(() => {
+    document.documentElement.dataset.look = id;
+  }, [id]);
+}
+
 export function App() {
+  useApplyLook();
   const me = useMe();
   const qc = useQueryClient();
   useRealtime(qc, Boolean(me.data));
@@ -129,7 +153,11 @@ function Shell({ me }: { me: Me }) {
           </svg>
           <span className="brand-name">Personal AI Workspace</span>
           <span className="brand-ws">· {me.workspace.name}</span>
-          <span className="local-badge" title="クラウドではなくローカルで動作しています。AI 実行はシミュレーションです">LOCAL</span>
+          {(window as unknown as { __PAW_DEMO__?: boolean }).__PAW_DEMO__ ? (
+            <span className="local-badge" title="ブラウザだけで動くデモです。AI 実行と GitHub はシミュレーションです">DEMO</span>
+          ) : (
+            <span className="local-badge" title="クラウドではなくローカルで動作しています。AI 実行はシミュレーションです">LOCAL</span>
+          )}
         </div>
         <nav className="nav">
           <NavLink to="/office">
@@ -150,6 +178,7 @@ function Shell({ me }: { me: Me }) {
           </NavLink>
         </nav>
         <div className="top-right">
+          <LookSwitch />
           {paused ? (
             <span className="paused-badge" title="キルスイッチで新規 Run の開始を停止中">
               <Icon name="pause" size={12} /> 停止中

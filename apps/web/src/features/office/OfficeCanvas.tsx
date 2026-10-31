@@ -3,7 +3,7 @@
  * 3D は読み取り中心のビュー（ADR-013）。状態はサーバーのスナップショットから描く。
  */
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { OfficeState } from '@paw/contracts';
 import { useOffice } from '../../shared/state/office';
@@ -14,25 +14,27 @@ import { ProjectIsland } from './ProjectIsland';
 import { islandPositions, sceneExtent } from './layout';
 import { tickScreens } from './screens';
 import { HtmlPortalContext } from './htmlPortal';
+import { useOfficeLook, type OfficeLook } from '../../shared/look';
 
 function ScreenTicker({ lowPower }: { lowPower: boolean }) {
   useFrame((state) => tickScreens(state.clock.elapsedTime, lowPower));
   return null;
 }
 
-function Floor() {
+function Floor({ look }: { look: OfficeLook }) {
   const grid = useMemo(() => {
-    const g = new THREE.GridHelper(160, 80, '#26304a', '#161d2e');
+    const g = new THREE.GridHelper(160, 80, look.gridMajor, look.gridMinor);
     const m = g.material as THREE.Material;
     m.transparent = true;
-    m.opacity = 0.55;
+    m.opacity = look.gridOpacity;
     return g;
-  }, []);
+  }, [look]);
+  useEffect(() => () => grid.dispose(), [grid]);
   return (
     <>
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.72, 0]} receiveShadow>
         <planeGeometry args={[400, 400]} />
-        <meshStandardMaterial color="#0c111c" roughness={1} />
+        <meshStandardMaterial color={look.floor} roughness={1} />
       </mesh>
       <primitive object={grid} position={[0, -0.7, 0]} />
     </>
@@ -45,6 +47,11 @@ function Scene({ snapshot, viewport }: { snapshot: OfficeState; viewport: { widt
   const focusProject = useOffice((s) => s.focusProject);
   const selectSeat = useOffice((s) => s.selectSeat);
   const lowPower = useOffice((s) => s.lowPower);
+  const look = useOfficeLook();
+  const gl = useThree((s) => s.gl);
+  useEffect(() => {
+    gl.toneMappingExposure = look.exposure;
+  }, [gl, look.exposure]);
   const projects = snapshot.projects;
   const positions = useMemo(() => islandPositions(projects.length), [projects.length]);
   const extent = useMemo(() => sceneExtent(projects.length), [projects.length]);
@@ -62,12 +69,13 @@ function Scene({ snapshot, viewport }: { snapshot: OfficeState; viewport: { widt
 
   return (
     <>
-      <color attach="background" args={['#090d16']} />
-      <ambientLight intensity={0.45} />
-      <hemisphereLight args={['#c7d2fe', '#0b1019', 0.55]} />
+      <color attach="background" args={[look.background]} />
+      <ambientLight intensity={look.ambient} />
+      <hemisphereLight args={[look.hemiSky, look.hemiGround, look.hemi]} />
       <directionalLight
         position={[22, 34, 14]}
-        intensity={1.9}
+        color={look.sun}
+        intensity={look.sunIntensity}
         castShadow={!lowPower}
         shadow-mapSize={[2048, 2048]}
         shadow-camera-left={-34}
@@ -79,8 +87,8 @@ function Scene({ snapshot, viewport }: { snapshot: OfficeState; viewport: { widt
         shadow-bias={-0.0004}
         shadow-normalBias={0.02}
       />
-      <directionalLight position={[-24, 14, -18]} intensity={0.45} color="#93c5fd" />
-      <Floor />
+      <directionalLight position={[-24, 14, -18]} intensity={look.rimIntensity} color={look.rim} />
+      <Floor look={look} />
       <HubCore hub={snapshot.hub} lowPower={lowPower} />
       <Walkways projects={projects} positions={positions} />
       {projects.map((p, i) => (

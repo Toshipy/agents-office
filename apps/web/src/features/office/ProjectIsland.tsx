@@ -10,6 +10,7 @@ import { AgentDesk } from './AgentDesk';
 import { ISLAND_HEIGHT, ISLAND_SIZE, SEAT_OFFSETS, mix } from './layout';
 import { Icon } from '../../shared/ui/Icon';
 import { useHtmlPortal } from './htmlPortal';
+import { useOfficeLook } from '../../shared/look';
 
 interface Props {
   project: ProjectViewModel;
@@ -30,14 +31,15 @@ function IslandImpl({ project, seats, position, focused, anyFocused, zoomedIn, s
   const portal = useHtmlPortal();
   const edge = useRef<THREE.Mesh>(null);
   const S = ISLAND_SIZE;
+  const look = useOfficeLook();
   const colors = useMemo(
     () => ({
-      top: mix(project.color, '#c8d0de', 0.42),
-      inner: mix(project.color, '#e8edf5', 0.55),
-      side: mix(project.color, '#121826', 0.62),
+      top: mix(project.color, look.island.top[0], look.island.top[1]),
+      inner: look.id === 'neon' ? project.color : mix(project.color, look.island.inner[0], look.island.inner[1]),
+      side: mix(project.color, look.island.side[0], look.island.side[1]),
       glow: project.color,
     }),
-    [project.color],
+    [project.color, look],
   );
   const dimmed = anyFocused && !focused;
   const border = useMemo(() => {
@@ -54,7 +56,8 @@ function IslandImpl({ project, seats, position, focused, anyFocused, zoomedIn, s
   useFrame((state) => {
     if (!edge.current) return;
     const m = edge.current.material as THREE.MeshStandardMaterial;
-    const target = focused ? 0.55 : hover ? 0.4 : 0.12 + Math.sin(state.clock.elapsedTime * 1.2 + index) * 0.04;
+    const base = look.island.edgeGlow;
+    const target = focused ? 0.55 + base * 0.4 : hover ? 0.4 + base * 0.3 : base * 0.6 + 0.06 + Math.sin(state.clock.elapsedTime * 1.2 + index) * 0.04;
     m.emissiveIntensity = THREE.MathUtils.lerp(m.emissiveIntensity, target, 0.1);
   });
 
@@ -89,17 +92,30 @@ function IslandImpl({ project, seats, position, focused, anyFocused, zoomedIn, s
           document.body.style.cursor = '';
         }}
       >
-        <meshStandardMaterial color={colors.side} emissive={colors.glow} emissiveIntensity={0.12} roughness={0.7} />
+        <meshStandardMaterial color={colors.side} emissive={colors.glow} emissiveIntensity={0.12} roughness={look.id === 'neon' ? 0.35 : 0.7} metalness={look.id === 'neon' ? 0.4 : 0} />
       </RoundedBox>
       {/* 天板（カーペット） */}
       <RoundedBox args={[S - 0.36, 0.05, S - 0.36]} radius={0.22} smoothness={3} position={[0, 0.0, 0]} receiveShadow>
-        <meshStandardMaterial color={colors.top} roughness={0.92} />
+        <meshStandardMaterial color={colors.top} roughness={look.id === 'neon' ? 0.4 : 0.92} metalness={look.id === 'neon' ? 0.2 : 0} />
       </RoundedBox>
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.03, 0]} receiveShadow>
         <planeGeometry args={[S - 2.2, S - 2.2]} />
-        <meshStandardMaterial color={colors.inner} roughness={0.95} transparent opacity={0.45} />
+        <meshStandardMaterial
+          color={colors.inner}
+          roughness={0.95}
+          transparent
+          opacity={look.island.innerOpacity * (look.id === 'neon' ? 0.35 : 1)}
+          emissive={look.id === 'neon' ? colors.glow : '#000000'}
+          emissiveIntensity={look.id === 'neon' ? 0.25 : 0}
+        />
       </mesh>
-      <Line points={border} color={project.color} lineWidth={focused ? 2.2 : 1.2} transparent opacity={focused || hover ? 0.95 : 0.35} />
+      <Line
+        points={border}
+        color={project.color}
+        lineWidth={look.island.borderWidth * (focused ? 1.6 : 1)}
+        transparent
+        opacity={focused || hover ? 0.95 : look.island.borderOpacity}
+      />
 
       {AGENT_ROLES.map((role, i) => {
         const seat = seats.find((x) => x.role === role);

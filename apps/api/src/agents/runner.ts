@@ -1,8 +1,10 @@
 /**
  * Agent Runner インターフェース（基本設計書 8.2 AgentStepInput / AgentStepResult の概念を実装）。
  *
- * ローカル版は SimulatedRunner のみ。OpenAI Agents SDK（Planner/Reviewer）や
- * Codex SDK（Developer/Tester）のアダプターは同じインターフェースで差し替える想定（ADR-007/008）。
+ * ローカル版は SimulatedRunner のみ。実行基盤の候補は
+ *   - Planner / Reviewer: Claude Agent SDK または OpenAI Agents SDK（ADR-007）
+ *   - Developer / Tester: Claude Code（Claude Agent SDK）または Codex SDK（ADR-008）
+ * で、いずれも同じインターフェースのアダプターとして差し替える（要求定義書 7-7「選択可能性」）。
  * Runner は自分の権限を増やせず、ツール呼び出しは必ず ctx.tool() 経由で Tool Broker の判定を受ける。
  */
 import type { StepKey, StepRole } from '@paw/contracts';

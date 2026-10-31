@@ -13,7 +13,7 @@ export interface Toast {
 
 const useToasts = create<{ items: Toast[]; push(t: Omit<Toast, 'id'>): void; remove(id: number): void }>((set) => ({
   items: [],
-  push: (t) => set((s) => ({ items: [...s.items.slice(-3), { ...t, id: Date.now() + Math.random() }] })),
+  push: (t) => set((s) => ({ items: [...s.items.slice(-1), { ...t, id: Date.now() + Math.random() }] })),
   remove: (id) => set((s) => ({ items: s.items.filter((x) => x.id !== id) })),
 }));
 
@@ -24,7 +24,7 @@ export function toast(t: Omit<Toast, 'id'>) {
 function ToastItem({ t }: { t: Toast }) {
   const remove = useToasts((s) => s.remove);
   useEffect(() => {
-    const h = window.setTimeout(() => remove(t.id), 6000);
+    const h = window.setTimeout(() => remove(t.id), 4500);
     return () => window.clearTimeout(h);
   }, [t.id, remove]);
   const icon = t.tone === 'error' ? 'x-circle' : t.tone === 'warn' ? 'alert' : t.tone === 'success' ? 'check-circle' : 'shield';

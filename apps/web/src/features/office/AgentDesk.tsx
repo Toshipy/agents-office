@@ -13,6 +13,7 @@ import { AGENT_STATUS_META, ROLE_META } from '../../shared/ui/status';
 import { Icon } from '../../shared/ui/Icon';
 import { useHtmlPortal } from './htmlPortal';
 import { DESK_ROTATION } from './layout';
+import { useOfficeLook } from '../../shared/look';
 
 interface Props {
   seat: SeatViewModel;
@@ -24,9 +25,6 @@ interface Props {
   phase: number;
   onSelect(key: string): void;
 }
-
-const DESK_TOP = '#e6eaf1';
-const DESK_LEG = '#1c2333';
 
 function Props_({ role }: { role: SeatViewModel['role'] }) {
   switch (role) {
@@ -94,6 +92,7 @@ function Props_({ role }: { role: SeatViewModel['role'] }) {
 function AgentDeskImpl({ seat, position, detail, selected, dimmed, lowPower, phase, onSelect }: Props) {
   const [hover, setHover] = useState(false);
   const portal = useHtmlPortal();
+  const look = useOfficeLook();
   const role = ROLE_META[seat.role];
   const meta = AGENT_STATUS_META[seat.status];
   const attention = seat.status !== 'idle';
@@ -120,12 +119,12 @@ function AgentDeskImpl({ seat, position, detail, selected, dimmed, lowPower, pha
     >
       {/* 机 */}
       <RoundedBox args={[1.62, 0.06, 0.84]} radius={0.025} position={[0, 0.74, -0.2]} castShadow receiveShadow>
-        <meshStandardMaterial color={DESK_TOP} roughness={0.55} />
+        <meshStandardMaterial color={look.desk.top} roughness={look.avatar === 'robot' ? 0.35 : 0.55} metalness={look.avatar === 'robot' ? 0.3 : 0} />
       </RoundedBox>
       {[-0.74, 0.74].map((x) => (
         <mesh key={x} position={[x, 0.36, -0.2]} castShadow>
           <boxGeometry args={[0.06, 0.72, 0.76]} />
-          <meshStandardMaterial color={DESK_LEG} roughness={0.6} />
+          <meshStandardMaterial color={look.desk.leg} roughness={0.6} />
         </mesh>
       ))}
       {/* モニター */}
@@ -140,7 +139,7 @@ function AgentDeskImpl({ seat, position, detail, selected, dimmed, lowPower, pha
         </mesh>
         <mesh position={[0, 0.42, 0]} castShadow>
           <boxGeometry args={[0.9, 0.54, 0.04]} />
-          <meshStandardMaterial color="#0f1522" roughness={0.4} />
+          <meshStandardMaterial color={look.desk.monitor} roughness={0.4} />
         </mesh>
         <mesh position={[0, 0.42, 0.021]}>
           <planeGeometry args={[0.84, 0.48]} />
@@ -150,13 +149,13 @@ function AgentDeskImpl({ seat, position, detail, selected, dimmed, lowPower, pha
       {/* キーボード */}
       <mesh position={[0, 0.78, -0.02]} castShadow>
         <boxGeometry args={[0.5, 0.02, 0.15]} />
-        <meshStandardMaterial color="#cbd5e1" roughness={0.6} />
+        <meshStandardMaterial color={look.desk.keyboard} roughness={0.6} />
       </mesh>
       <Props_ role={seat.role} />
 
       {/* キャラクター */}
       <group position={[0, 0, 0.62]} scale={hover && !selected ? 1.04 : 1}>
-        <AgentAvatar roleColor={role.color} status={seat.status} phase={phase} lowPower={lowPower} />
+        <AgentAvatar roleColor={role.color} status={seat.status} phase={phase} lowPower={lowPower} style={look.avatar} chairColor={look.chair} />
         <AgentStatusFx status={seat.status} lowPower={lowPower} phase={phase} />
         {selected ? <SelectionRing /> : null}
       </group>

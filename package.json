@@ -13,7 +13,8 @@
     "test": "pnpm -r --if-present test",
     "typecheck": "pnpm -r --if-present typecheck",
     "db:reset": "node -e \"require('fs').rmSync('.data',{recursive:true,force:true});console.log('removed .data')\"",
-    "webhook:send": "pnpm --filter @paw/api exec tsx scripts/send-webhook.ts"
+    "webhook:send": "pnpm --filter @paw/api exec tsx scripts/send-webhook.ts",
+    "build:demo": "pnpm --filter @paw/web build:demo"
   },
   "devDependencies": {
     "concurrently": "9.2.5",

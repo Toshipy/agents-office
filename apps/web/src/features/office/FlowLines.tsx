@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import type { ProjectViewModel } from '@paw/contracts';
 import { useOffice, type Fx } from '../../shared/state/office';
 import { HUB_RADIUS, ISLAND_SIZE } from './layout';
+import { useOfficeLook } from '../../shared/look';
 
 interface Anchor {
   id: string;
@@ -27,6 +28,7 @@ export function Walkways({ projects, positions }: { projects: ProjectViewModel[]
 
 function Walkway({ project, to }: { project: ProjectViewModel; to: [number, number] }) {
   const line = useRef<any>(null);
+  const look = useOfficeLook();
   const active = project.stats.doing > 0 || project.stats.next > 0;
   const auto = project.repo?.automationEnabled ?? false;
   const { mid, len, angle, start, end } = useMemo(() => {
@@ -52,12 +54,12 @@ function Walkway({ project, to }: { project: ProjectViewModel; to: [number, numb
     <group>
       <mesh position={mid} rotation={[0, angle, 0]} receiveShadow>
         <boxGeometry args={[1.25, 0.18, len]} />
-        <meshStandardMaterial color="#161c2c" roughness={0.75} />
+        <meshStandardMaterial color={look.walkway} roughness={0.75} />
       </mesh>
       <Line
         ref={line}
         points={[start, end]}
-        color={auto || active ? project.color : '#475569'}
+        color={auto || active ? project.color : look.walkwayIdleLine}
         lineWidth={1.6}
         dashed
         dashSize={0.35}

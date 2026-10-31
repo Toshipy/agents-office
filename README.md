@@ -3,7 +3,7 @@
 `docs/` の要求定義書・要件定義書・基本設計書（v0.2）をもとに、**クラウド（AWS）ではなくローカルで動く**ように実装したものです。
 自分専用の 3D オフィスで、複数 Project の AI エージェント（Planner / Developer / Tester / Reviewer）の稼働状況・作業ログ・成果物・承認待ちを確認できます。
 
-> **AI の実行はシミュレーションです。** OpenAI Agents SDK / Codex SDK / GitHub には接続していません。
+> **AI の実行はシミュレーションです。** Claude / OpenAI の各 SDK や GitHub には接続していません。
 > 計画 → 実装 → テスト → レビュー → Draft PR の流れ、ツール呼び出しとポリシー判定、成果物、利用量（推定）を
 > ローカルのシミュレーション Runner が再現します（詳しくは「クラウド版との対応」）。
 
@@ -72,6 +72,28 @@ pnpm typecheck
 | **Projects** | Project 作成・アーカイブ、Repo 接続、自動起動ルール（初期 OFF・`ai:ready` ラベル）、GitHub シミュレーター（署名付き Webhook の送信・同じ Delivery の再送） |
 | **設定** | 月間 / Run 予算、同時実行数、キルスイッチ（新規停止・緊急停止）、利用量、Agent 定義、監査ログ |
 
+### 見た目（デザイン案）
+
+上部バーの **A / B / C** で切り替えられます（選択はブラウザに保存）。どれも同じデータ・同じ画面構成で、見た目だけが変わります。
+
+| 案 | 名前 | 特徴 |
+|---|---|---|
+| A | Night Studio | 夜のスタジオ。くすんだパステルの島、木目の机、人型のスタッフ、見出しはセリフ体。動画に最も近い落ち着いた雰囲気 |
+| B | Neon Control | 管制室。半透明の島がプロジェクト色に発光し、ロボットが働く。角ばった HUD 風の文字 |
+| C | Daylight Diorama | 昼の模型。明るい光と柔らかい影、粘土のような丸いキャラクター。ライトテーマ |
+
+### ブラウザだけで動くデモ
+
+API を起動せずに見た目と動きを確認できるデモ版もあります（AI 実行・GitHub・データはすべてブラウザ内のシミュレーション）。
+
+```bash
+pnpm build:demo
+```
+
+```bash
+pnpm --filter @paw/web preview:demo
+```
+
 3D 表示の操作: ドラッグでパン、ホイールでズーム、右下のボタン（＋／−／視点初期化／低負荷表示／2D 切替）。
 キーボード: `+` `-` ズーム、`0` 視点初期化、`Esc` 選択解除。WebGL が使えない環境では自動で 2D 表示になります。
 
@@ -124,7 +146,7 @@ pnpm webhook:send -- --repo alice/storefront-web --installation <ID> --title "CS
 | Step Functions Standard | `WorkflowEngine`（プロセス内・DB 永続） | 遷移表どおりの状態遷移、楽観ロック、再試行・タイムアウト・予算・同時実行数、再起動時の復旧 |
 | API Gateway + Lambda（Webhook 検証） | `POST /integrations/github/webhook` | raw body の HMAC-SHA256 を定数時間比較、サイズ・ヘッダー検証 |
 | SQS + DLQ / Lambda Dispatcher | `webhook_deliveries` テーブル（永続キュー）+ `Dispatcher` | `provider + delivery_id` の一意制約で冪等化。5 回失敗で dead_letter |
-| ECS Fargate + OpenAI Agents SDK / Codex SDK | `SimulatedRunner` | `AgentRunner` インターフェースで差し替え可能（`apps/api/src/agents/runner.ts`） |
+| ECS Fargate + AI 実行基盤（候補: Claude Agent SDK・Claude Code / OpenAI Agents SDK・Codex SDK） | `SimulatedRunner` | `AgentRunner` インターフェースで差し替え可能（`apps/api/src/agents/runner.ts`） |
 | GitHub App / Tool Broker | GitHub シミュレーター + `authorizeTool` | 本番と同じ署名付き Webhook 経路。Tool Broker は接続 Repo・`ai/` ブランチ・Draft のみ許可、マージ・Secrets 等は常に拒否 |
 | S3 Artifacts | `.data/artifacts/workspaces/<ws>/runs/<run>/…` | 取得は API で所有権確認後のみ。sha256 チェックサムを検証 |
 | SSE / ポーリング | 同じ | `GET /v1/events/stream`（Last-Event-ID で差分再送）、失敗時は 3 秒ポーリングに切替 |
@@ -134,10 +156,11 @@ pnpm webhook:send -- --repo alice/storefront-web --installation <ID> --title "CS
 ```text
 apps/
   api/          Hono API・ワークフローエンジン・Webhook・シミュレーター・シード
-  web/          React + R3F（features/office が 3D オフィス）
+  web/          React + R3F（features/office が 3D オフィス、src/demo がブラウザ内デモ）
 packages/
   contracts/    API / イベントの Zod スキーマ・状態遷移表・ビューモデル型
   office-model/ Run / Step / Approval → 3D 表示状態への投影（純粋関数・テストあり）
+  sim-content/  シミュレーションの成果物（計画・差分・テスト結果など）の生成（API とデモで共有）
 docs/           要求定義書・要件定義書・基本設計書
 ```
 
@@ -175,14 +198,15 @@ docs/           要求定義書・要件定義書・基本設計書
 
 ## 未実装（P1 / P2 またはクラウド前提のもの）
 
-- OpenAI Agents SDK / Codex SDK / GitHub App への実接続（Runner インターフェースのみ用意）
+- AI 実行基盤（Claude Agent SDK・Claude Code / OpenAI Agents SDK・Codex SDK）と GitHub App への実接続（Runner インターフェースのみ用意）
 - 運用者向けの障害・遅延通知（FR-057）、ログ保持期間の設定（UI-07 の一部）、データのエクスポート・削除（FR-058）
 - P1: 文書・連絡 Agent、Slack / Gmail / Drive 連携、定期タスク。P2: チーム共有、ナレッジグラフ
 - Runner のコンテナ隔離・ネットワーク制限（シミュレーションのため対象外）
 
 ## 確認したいこと
 
-- 実際の AI 実行の接続先: OpenAI Agents SDK / Codex SDK で進めるか、Claude（Claude Agent SDK 等）も候補に入れるか（要求定義書 7-7「選択可能性」）。API キーはサーバー管理で良いか。
+- AI 実行基盤は Claude（Claude Agent SDK / Claude Code）と OpenAI（Agents SDK / Codex SDK）を候補として両方に対応できる形にしています。最初に実接続するのはどちらにするか、API キーはサーバー管理で良いか。
+- デザイン案 A / B / C のどれをベースにするか（組み合わせも可。例: A の配色に B のキャラクター）。
 - ローカル版で次に本物にしたい部分の優先順位（例: 実 GitHub App 連携 → 実 Runner → Cognito）。
 - 自動起動の条件は `ai:ready` ラベル方式（O-04 の仮置き）で確定して良いか。
 - 承認待ちの期限（現在: Draft PR 14 日、危険操作・判断待ち 72 時間）と、期限切れ時の扱い（現在: 失効させて再確認を作成）で良いか。
