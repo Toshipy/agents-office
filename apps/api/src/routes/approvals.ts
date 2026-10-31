@@ -83,6 +83,14 @@ export function registerApprovalRoutes(app: Hono<AppEnv>, s: Services) {
         const [run] = await s.db.select().from(runs).where(and(eq(runs.id, ap.runId), eq(runs.workspaceId, a.workspaceId)));
         if (!run || run.status !== 'needs_input') return { updated, run };
         if (body.decision === 'reject') return { updated, run, cancel: true };
+        // 利用上限による一時停止: 続行（承認）は止まった工程から再開、差し戻しはコメントを踏まえて再計画
+        if (ap.payload.reason === 'usage_limit') {
+          const next =
+            body.decision === 'approve' && typeof ap.payload.pausedStepId === 'string'
+              ? await s.engine.resumePausedStep(run.id, ap.payload.pausedStepId)
+              : await s.engine.resumeFromInput(run.id, body.comment ?? null, false);
+          return { updated, run: next ?? run };
+        }
         const guidance =
           ap.actionType === 'dangerous_operation'
             ? `危険な操作（${(ap.payload.detected as string[] | undefined)?.join('、') ?? ''}）は除外し、安全な範囲のみ実施。${body.comment ?? ''}`

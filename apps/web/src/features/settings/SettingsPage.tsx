@@ -11,6 +11,7 @@ import { toast } from '../../shared/ui/toast';
 import { LookSwitch, useMe } from '../../app/App';
 import { LOOKS, useLook } from '../../shared/look';
 import { useOffice } from '../../shared/state/office';
+import { isClaudeRuntime, runtimeLabel } from '../../shared/runtime';
 
 interface Usage {
   measurement: string;
@@ -185,22 +186,55 @@ export function SettingsPage() {
       </div>
 
       <div className="detail-grid">
-        <section className={`card runtime-card${runtime.data?.runtime === 'claude' ? ' on' : ''}`}>
+        <section className={`card runtime-card${isClaudeRuntime(runtime.data?.runtime) ? ' on' : ''}`}>
           <h3 className="card-title">
             <Icon name="sparkles" size={15} /> AI 実行基盤
           </h3>
           {runtime.data ? (
             <>
               <div className="runtime-state">
-                <span className={`runtime-pill ${runtime.data.runtime}`}>{runtime.data.runtime === 'claude' ? 'Claude' : 'シミュレーション'}</span>
+                <span className={`runtime-pill ${runtime.data.runtime}`}>{runtimeLabel(runtime.data.runtime)}</span>
                 {runtime.data.runtime === 'claude' ? <span className="mono small">{runtime.data.model} · effort {runtime.data.effort}</span> : null}
+                {runtime.data.runtime === 'claude_code' ? (
+                  <span className="mono small">
+                    v{runtime.data.claudeCode.version ?? '?'} · {runtime.data.model ?? 'CLI の既定モデル'}
+                  </span>
+                ) : null}
               </div>
               <p className="small muted">{runtime.data.reason}</p>
               <p className="small">{runtime.data.note}</p>
+              {runtime.data.runtime === 'claude_code' ? (
+                <dl className="kv cols runtime-kv">
+                  <div>
+                    <dt>ログイン</dt>
+                    <dd>{runtime.data.claudeCode.authLabel ?? '未確認'}</dd>
+                  </div>
+                  <div>
+                    <dt>課金</dt>
+                    <dd>{runtime.data.billing === 'subscription' ? 'サブスクの利用枠（API 課金なし）' : 'API 課金'}</dd>
+                  </div>
+                  <div>
+                    <dt>制限モード</dt>
+                    <dd>{runtime.data.claudeCode.restricted ? '有効（--restricted）' : '無効'}</dd>
+                  </div>
+                  <div>
+                    <dt>工程の上限</dt>
+                    <dd className="mono">
+                      {runtime.data.claudeCode.maxTurns.develop} ターン / {Math.round(runtime.data.stepTimeoutMs / 60000)} 分
+                    </dd>
+                  </div>
+                </dl>
+              ) : null}
+              {runtime.data.claudeCode.problem && runtime.data.runtime !== 'claude_code' && runtime.data.mode === 'auto' ? (
+                <p className="hint warn">Claude Code（サブスク）を使えない理由: {runtime.data.claudeCode.problem}</p>
+              ) : null}
+              {runtime.data.claudeCode.problem && runtime.data.runtime === 'claude_code' ? <p className="hint warn">{runtime.data.claudeCode.problem}</p> : null}
               {runtime.data.runtime === 'claude' ? (
                 <p className="hint">拒否（refusal）時は Anthropic のサーバー側フォールバック（default）で別モデルに切り替わります。費用は API が返したトークン数（実測）から計算します。</p>
+              ) : runtime.data.runtime === 'claude_code' ? (
+                <p className="hint">Claude Code はシェルを使えない制限モードで動き、ファイル操作は Run 専用の作業コピーに限られます。サブスクの利用上限に達すると Run は一時停止し、「承認・判断」から続行できます。</p>
               ) : (
-                <p className="hint">API を起動するシェルで ANTHROPIC_API_KEY を設定し、Projects でローカルリポジトリを指定してください。</p>
+                <p className="hint">この PC で Claude Code に claude.ai アカウントでログイン（`claude auth login`）して API を再起動すると、サブスクで動きます。Projects でローカルリポジトリの指定も必要です。</p>
               )}
             </>
           ) : (

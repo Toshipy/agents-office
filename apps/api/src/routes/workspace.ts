@@ -1,3 +1,4 @@
+import { authMethodLabel } from '../agents/claude/detect';
 import type { Hono } from 'hono';
 import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { ACTIVE_RUN_STATUSES, KillSwitchRequest, WorkspaceSettingsRequest } from '@paw/contracts';
@@ -78,20 +79,38 @@ export function registerWorkspaceRoutes(app: Hono<AppEnv>, s: Services) {
 
   app.get('/v1/workspaces/me/office-state', async (c) => c.json(await buildOfficeState(s.db, s.engine, auth(c).workspaceId)));
 
-  /** AI 実行基盤の状態（Claude が有効か、どのモデルか） */
-  app.get('/v1/runtime', (c) =>
-    c.json({
-      runtime: s.config.agentRuntime,
+  /** AI 実行基盤の状態（どの手段で Claude を動かすか・モデル・検出結果） */
+  app.get('/v1/runtime', (c) => {
+    const rt = s.config.agentRuntime;
+    const cc = s.config.claudeCode;
+    return c.json({
+      runtime: rt,
+      mode: s.config.agentRuntimeMode,
       reason: s.config.agentRuntimeReason,
-      model: s.config.claudeModel,
-      effort: s.config.claudeEffort,
-      fallbacks: 'default',
+      model: rt === 'claude' ? s.config.claudeModel : rt === 'claude_code' ? cc.model : null,
+      effort: rt === 'claude' ? s.config.claudeEffort : rt === 'claude_code' ? cc.effort : null,
+      fallbacks: rt === 'claude' ? 'default' : null,
+      billing: rt === 'claude' ? 'api' : rt === 'claude_code' ? (cc.detected?.subscription === false ? 'api' : 'subscription') : 'none',
+      claudeCode: {
+        bin: cc.bin,
+        restricted: cc.restricted,
+        allowApiBilling: cc.allowApiBilling,
+        maxTurns: cc.maxTurns,
+        version: cc.detected?.version ?? null,
+        loggedIn: cc.detected?.loggedIn ?? null,
+        authMethod: cc.detected?.authMethod ?? null,
+        authLabel: cc.detected ? authMethodLabel(cc.detected.authMethod) : null,
+        problem: cc.detected?.problem ?? null,
+      },
+      stepTimeoutMs: rt === 'simulated' ? s.config.stepTimeoutMs : s.config.claudeStepTimeoutMs,
       note:
-        s.config.agentRuntime === 'claude'
-          ? 'ローカルリポジトリを設定した Project の Run は Claude で実行されます。それ以外の Project はシミュレーションです。'
-          : 'ANTHROPIC_API_KEY を設定して API を再起動すると、ローカルリポジトリを設定した Project の Run が Claude で実行されます。',
-    }),
-  );
+        rt === 'claude_code'
+          ? 'ローカルリポジトリを設定した Project の Run は、この PC の Claude Code（ログイン中のサブスクの利用枠）で実行されます。利用上限に達すると Run は一時停止し、続行の判断を待ちます。'
+          : rt === 'claude'
+            ? 'ローカルリポジトリを設定した Project の Run は Claude API（従量課金）で実行されます。それ以外の Project はシミュレーションです。'
+            : 'Claude Code にサブスクでログインするか ANTHROPIC_API_KEY を設定して API を再起動すると、ローカルリポジトリを設定した Project の Run が Claude で実行されます。',
+    });
+  });
 
   app.get('/v1/agents', async (c) => {
     const a = auth(c);
@@ -103,13 +122,20 @@ export function registerWorkspaceRoutes(app: Hono<AppEnv>, s: Services) {
         id: d.id,
         role: d.role,
         name: d.name,
-        model: s.config.agentRuntime === 'claude' ? s.config.claudeModel : d.model,
+        model:
+          s.config.agentRuntime === 'claude'
+            ? s.config.claudeModel
+            : s.config.agentRuntime === 'claude_code'
+              ? (s.config.claudeCode.model ?? 'Claude Code の既定モデル')
+              : d.model,
         runtime:
           d.role === 'tester'
             ? 'Project に設定したテストコマンド（ローカル worktree で実行）'
             : s.config.agentRuntime === 'claude'
-              ? `Claude API（${s.config.claudeModel}）— ローカルリポジトリ未設定の Project はシミュレーション`
-              : 'Claude API（未設定 → ローカルシミュレーション）',
+              ? `Claude API（${s.config.claudeModel}・従量課金）— ローカルリポジトリ未設定の Project はシミュレーション`
+              : s.config.agentRuntime === 'claude_code'
+                ? 'Claude Code（この PC のログイン・サブスクの利用枠）— ローカルリポジトリ未設定の Project はシミュレーション'
+                : 'Claude（未設定 → ローカルシミュレーション）',
         promptVersion: d.promptVersion,
         toolPolicy: d.toolPolicy,
         version: d.version,

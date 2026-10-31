@@ -2995,13 +2995,18 @@ label.check {
   color: var(--muted);
   white-space: nowrap;
 }
-.runtime-pill.claude {
+.runtime-pill.claude,
+.runtime-pill.claude_code {
   color: #ffb38a;
   border-color: color-mix(in srgb, #ff8f5a 55%, transparent);
   background: color-mix(in srgb, #ff8f5a 12%, transparent);
 }
-:root[data-look='daylight'] .runtime-pill.claude {
+:root[data-look='daylight'] .runtime-pill.claude,
+:root[data-look='daylight'] .runtime-pill.claude_code {
   color: #b4440f;
+}
+.runtime-kv {
+  margin: 8px 0 4px;
 }
 .runtime-tag {
   font-size: 10.5px;

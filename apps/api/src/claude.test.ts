@@ -12,7 +12,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
 import { runSteps, runs, stepLogs, usageRecords } from './db/schema';
-import type { ClaudeMessagesClient } from './agents/claude/runner';
+import type { ClaudeMessagesClient } from './agents/claude/apiBackend';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-claude-'));
 const repo = join(tmp, 'repo');

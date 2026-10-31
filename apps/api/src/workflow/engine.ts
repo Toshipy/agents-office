@@ -14,6 +14,7 @@ import {
   TERMINAL_RUN_STATUSES,
   canTransition,
   type AgentRole,
+  type AgentRuntime,
   type ApprovalActionType,
   type RunStatus,
   type StepKey,
@@ -39,7 +40,7 @@ import { digestPayload } from '../lib/crypto';
 import { log } from '../lib/logger';
 import { Mutex } from '../lib/mutex';
 import type { AgentRunner, StepExecutionContext, StepOutput } from '../agents/runner';
-import { RunnerCrashError, RunnerError } from '../agents/runner';
+import { RunnerCrashError, RunnerError, UsageLimitError } from '../agents/runner';
 import type { ArtifactStore } from './artifactStore';
 import { authorizeTool } from './toolBroker';
 
@@ -176,7 +177,7 @@ export class WorkflowEngine {
     issueKey?: string | null;
     maxRevisionAttempts: number;
     budgetLimitUsd: number;
-    runtime?: 'claude' | 'simulated';
+    runtime?: AgentRuntime;
   }): Promise<RunRow> {
     const [run] = await this.db
       .insert(runs)
@@ -257,13 +258,13 @@ export class WorkflowEngine {
     return row;
   }
 
-  /** Project の設定から、この Run を Claude で実行するかを決める */
-  runtimeFor(binding: { localPath: string | null } | null | undefined): 'claude' | 'simulated' {
-    return this.config.agentRuntime === 'claude' && binding?.localPath ? 'claude' : 'simulated';
+  /** Project の設定から、この Run を Claude（API / Claude Code）で実行するかを決める */
+  runtimeFor(binding: { localPath: string | null } | null | undefined): AgentRuntime {
+    return this.config.agentRuntime !== 'simulated' && binding?.localPath ? this.config.agentRuntime : 'simulated';
   }
 
   private async cleanupRun(run: RunRow) {
-    if (run.runtime !== 'claude' || !this.runner.onRunFinished) return;
+    if (run.runtime === 'simulated' || !this.runner.onRunFinished) return;
     try {
       const [binding] = await this.db.select().from(repositoryBindings).where(eq(repositoryBindings.projectId, run.projectId));
       await this.runner.onRunFinished(run.id, binding?.localPath ?? null, branchFor(run.id));
@@ -350,7 +351,7 @@ export class WorkflowEngine {
     await this.db
       .update(runSteps)
       .set({ status: 'cancelled', finishedAt: new Date() })
-      .where(and(eq(runSteps.runId, runId), inArray(runSteps.status, ['pending'])));
+      .where(and(eq(runSteps.runId, runId), inArray(runSteps.status, ['pending', 'needs_input'])));
     await this.supersedePendingApprovals(runId);
   }
 
@@ -371,7 +372,7 @@ export class WorkflowEngine {
       await this.db
         .update(runSteps)
         .set({ status: 'cancelled', finishedAt: new Date() })
-        .where(and(eq(runSteps.runId, runId), inArray(runSteps.status, ['pending', 'running'])));
+        .where(and(eq(runSteps.runId, runId), inArray(runSteps.status, ['pending', 'running', 'needs_input'])));
       await this.supersedePendingApprovals(runId);
       return row;
     });
@@ -464,11 +465,12 @@ export class WorkflowEngine {
     if (!claimed) return;
     const flight: Inflight = { controller, runId: claimed.runId, cancelled: false };
     this.inflight.set(stepId, flight);
-    const timeout = setTimeout(
-      () => controller.abort(new StepTimeoutError(`step timed out after ${this.config.stepTimeoutMs}ms`)),
-      this.config.stepTimeoutMs,
-    );
+    let timeout: NodeJS.Timeout | undefined;
     try {
+      // Claude で実行する工程はモデルの応答やテストに時間がかかるため、シミュレーションとは別の上限を使う
+      const [rt] = await this.db.select({ runtime: runs.runtime }).from(runs).where(eq(runs.id, claimed.runId));
+      const timeoutMs = rt && rt.runtime !== 'simulated' ? this.config.claudeStepTimeoutMs : this.config.stepTimeoutMs;
+      timeout = setTimeout(() => controller.abort(new StepTimeoutError(`step timed out after ${timeoutMs}ms`)), timeoutMs);
       const prepared = await this.withRunLock(claimed.runId, () => this.prepareStep(claimed));
       if (!prepared) return;
       const ctx = this.buildContext(prepared.step, prepared.run, prepared, controller.signal);
@@ -709,6 +711,10 @@ export class WorkflowEngine {
       await this.db.update(runSteps).set({ status: 'cancelled', finishedAt: now }).where(eq(runSteps.id, step.id));
       return;
     }
+    if (err instanceof UsageLimitError) {
+      await this.pauseForUsageLimit(step, run, err);
+      return;
+    }
     const code =
       err instanceof RunnerError
         ? err.code
@@ -945,14 +951,84 @@ export class WorkflowEngine {
     });
   }
 
-  /** needs_input からの再開（人の判断: 承認 / 差し戻し） */
+  /** needs_input からの再開（人の判断: 承認 / 差し戻し）。計画からやり直す */
   async resumeFromInput(runId: string, guidance: string | null, resetRevisions: boolean) {
     const r = await this.transition(runId, 'planning', {
       guidance,
       fixLoops: 0,
       ...(resetRevisions ? { revisionCount: 0 } : {}),
     });
-    if (r) await this.addStep(r, 'plan', 'planner', r.revisionCount);
+    if (!r) return r;
+    // 利用上限で一時停止していた工程は、再計画するので取り消す
+    await this.db
+      .update(runSteps)
+      .set({ status: 'cancelled', finishedAt: new Date() })
+      .where(and(eq(runSteps.runId, runId), eq(runSteps.status, 'needs_input')));
+    await this.addStep(r, 'plan', 'planner', r.revisionCount);
+    return r;
+  }
+
+  /**
+   * サブスク（Claude Code）の利用上限に達した工程を一時停止し、Run を needs_input にする。
+   * 失敗にはせず、人の「続行」でその工程から再開できるようにする（利用者の要望）。
+   */
+  private async pauseForUsageLimit(step: StepRow, run: RunRow, err: UsageLimitError) {
+    const now = new Date();
+    await this.db.insert(stepLogs).values({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: step.id,
+      kind: 'error',
+      message: `${err.code}: ${err.message} — Run を一時停止し、判断待ちにします`,
+    });
+    const r = await this.transition(run.id, 'needs_input');
+    if (!r) {
+      // 既に中止・失敗等で遷移できない場合は、この工程も終える
+      await this.db.update(runSteps).set({ status: 'cancelled', finishedAt: now }).where(eq(runSteps.id, step.id));
+      return;
+    }
+    await this.db
+      .update(runSteps)
+      .set({ status: 'needs_input', errorCode: err.code, summary: err.message.slice(0, 300), finishedAt: now })
+      .where(eq(runSteps.id, step.id));
+    await this.bus.emit(
+      run.workspaceId,
+      'step.finished',
+      { stepId: step.id, key: step.key, role: step.role, status: 'needs_input', errorCode: err.code },
+      { runId: run.id, projectId: run.projectId },
+    );
+    await this.createApproval(r, 'clarification', step.role === 'tool_broker' ? 'planner' : step.role, 'Claude の利用上限に達したため一時停止', {
+      reason: 'usage_limit',
+      pausedStepId: step.id,
+      stepKey: step.key,
+      resetsAt: err.resetsAt,
+      message: err.message,
+      note: '上限がリセットされた後に「続行」を押すと、止まった工程から再開します。差し戻すとコメントを踏まえて計画からやり直し、却下すると Run を中止します。',
+    });
+  }
+
+  /** 利用上限で一時停止した工程を、同じ工程から再開する（承認＝続行） */
+  async resumePausedStep(runId: string, stepId: string): Promise<RunRow | null> {
+    const [step] = await this.db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.id, stepId), eq(runSteps.runId, runId), eq(runSteps.status, 'needs_input')));
+    if (!step) return this.resumeFromInput(runId, null, false);
+    const target: RunStatus = step.key === 'plan' ? 'planning' : step.key === 'implement' ? 'running' : 'validating';
+    const r = await this.transition(runId, target);
+    if (!r) return null;
+    // 再開時は再試行回数を数え直す（上限による停止は失敗ではないため）
+    await this.db
+      .update(runSteps)
+      .set({ status: 'pending', attempt: 0, errorCode: null, finishedAt: null, nextAttemptAt: new Date() })
+      .where(eq(runSteps.id, step.id));
+    await this.db.insert(stepLogs).values({
+      workspaceId: r.workspaceId,
+      runId: r.id,
+      stepId: step.id,
+      kind: 'log',
+      message: '人の「続行」により、一時停止していた工程を再開します',
+    });
     return r;
   }
 

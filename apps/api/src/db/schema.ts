@@ -20,12 +20,14 @@ import {
 } from 'drizzle-orm/pg-core';
 import type {
   AgentRole,
+  AgentRuntime,
   ApprovalActionType,
   ApprovalStatus,
   RunStatus,
   StepKey,
   StepRole,
   StepStatus,
+  UsageMeasurement,
 } from '@paw/contracts';
 
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
@@ -174,7 +176,7 @@ export const runs = pgTable(
     request: text('request').notNull(),
     workflow: text('workflow').notNull(),
     /** AI 実行基盤: claude（Claude API）/ simulated（ローカルシミュレーション） */
-    runtime: text('runtime').$type<'claude' | 'simulated'>().notNull().default('simulated'),
+    runtime: text('runtime').$type<AgentRuntime>().notNull().default('simulated'),
     source: jsonb('source').$type<RunSource>().notNull(),
     /** 同一 Issue に同時に 2 件の開発 Run を起動しないためのキー（要件定義書 5.2） */
     issueKey: text('issue_key'),
@@ -344,7 +346,7 @@ export const usageRecords = pgTable(
     durationMs: integer('duration_ms').notNull(),
     estimatedCostUsd: doublePrecision('estimated_cost_usd').notNull(),
     /** FR-055: 実測 / 推定 / 未計測 を区別 */
-    measurement: text('measurement').$type<'measured' | 'estimated' | 'unmeasured'>().notNull(),
+    measurement: text('measurement').$type<UsageMeasurement>().notNull(),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [index('usage_ws_created_idx').on(t.workspaceId, t.createdAt)],

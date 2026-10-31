@@ -3,9 +3,10 @@
 `docs/` の要求定義書・要件定義書・基本設計書（v0.2）をもとに、**クラウド（AWS）ではなくローカルで動く**ように実装したものです。
 自分専用の 3D オフィスで、複数 Project の AI エージェント（Planner / Developer / Tester / Reviewer）の稼働状況・作業ログ・成果物・承認待ちを確認できます。
 
-> **AI は Claude で動きます。** `ANTHROPIC_API_KEY` を設定し、Project にローカルの git リポジトリを指定すると、
-> Claude（`claude-opus-5-5`）が Run ごとの専用ブランチで計画 → 実装 → テスト → レビュー → Draft PR を進めます（「Claude で実行する」）。
-> キー未設定の場合や、ローカルリポジトリを指定していない Project はシミュレーションで動きます。GitHub への push は未接続です。
+> **AI は Claude で動きます。** この PC の Claude Code に **claude.ai のサブスク（Pro / Max など）でログイン済み**なら、
+> API キーなし・追加課金なしで、その利用枠を使って動きます。`ANTHROPIC_API_KEY`（Claude API・従量課金）でも動かせます。
+> Project にローカルの git リポジトリを指定すると、Claude が Run ごとの専用ブランチで計画 → 実装 → テスト → レビュー → Draft PR を進めます（「Claude で実行する」）。
+> どちらも無い場合や、ローカルリポジトリを指定していない Project はシミュレーションで動きます。GitHub への push は未接続です。
 
 Agents Office のソースコード・3D モデル・固有デザイン・名称は使っていません（要求定義書 1.3 / ADR-015）。
 3D のキャラクター・机・島・ハブ・アイコンはすべてこのリポジトリ内のコードで作った独自のものです。
@@ -68,7 +69,7 @@ pnpm typecheck
 | **Office**（3D） | Project ごとの島・席・状態を俯瞰。島またはカードをクリックでその Project に寄る。キャラクターをクリックで担当 Run・ライブ作業ログ・成果物を表示。右パネルからタスクを依頼 |
 | **Runs** | 全 Project の Run 一覧（検索・状態 / Project フィルター・ページング） |
 | **Run 詳細** | Step（担当・モデル・試行回数）、ツール呼び出し／ポリシー拒否のログ、成果物（計画・差分・テスト結果・レビュー・Draft PR）、イベント履歴、推定費用、中止 |
-| **承認** | Draft PR レビュー、危険操作の検知、再修正上限のエスカレーション。内容ハッシュ・版数・期限をサーバーで検証 |
+| **承認** | Draft PR レビュー、危険操作の検知、要件確認、再修正上限のエスカレーション、Claude の利用上限による一時停止からの再開。内容ハッシュ・版数・期限をサーバーで検証 |
 | **Projects** | Project 作成・アーカイブ、Repo 接続、自動起動ルール（初期 OFF・`ai:ready` ラベル）、GitHub シミュレーター（署名付き Webhook の送信・同じ Delivery の再送） |
 | **設定** | 月間 / Run 予算、同時実行数、キルスイッチ（新規停止・緊急停止）、利用量、Agent 定義、監査ログ |
 
@@ -84,42 +85,105 @@ pnpm typecheck
 
 ## Claude で実行する
 
-1. API を起動するシェルで Claude の API キーを設定します（または `ant auth login` のプロファイル）。
+Claude の動かし方は 2 通りあります。起動時に自動で選びます（`PAW_AGENT_RUNTIME=auto`）。
+
+| 実行基盤 | 認証 | 費用 | 選ばれる条件（auto） |
+|---|---|---|---|
+| **Claude Code（サブスク）** | この PC の `claude` CLI のログイン（claude.ai アカウント） | **追加課金なし**。プランの利用枠（5 時間ごと・週ごとの上限。claude.ai のチャットと共有）を消費 | `claude auth status` が claude.ai / OAuth トークンでログイン済み、かつ Claude Code 2.1.248 以上 |
+| Claude API | `ANTHROPIC_API_KEY` | トークン従量課金（サブスクとは別請求） | 上が使えず、API キーが設定されている |
+
+サブスクと API キーの両方が使える場合は、**サブスクを優先**します（追加課金を避けるため）。API を使いたい場合は `PAW_AGENT_RUNTIME=claude` を指定してください。
+選ばれた実行基盤と理由は **設定 → AI 実行基盤** に表示されます。
+
+### A. サブスク（Claude Code）で動かす
+
+1. Claude Code をインストールし、claude.ai アカウント（Pro / Max など）でログインします。
+
+```bash
+claude auth login
+```
+
+```bash
+claude auth status
+```
+
+`"authMethod": "claude.ai"` と表示されれば準備完了です。
+
+2. API を起動します（API キーは不要です。設定されていても Claude Code には渡しません）。
+
+```bash
+pnpm dev
+```
+
+3. **Projects** で、対象 Project の「Claude が作業するローカルリポジトリ」に git リポジトリの絶対パスを入れて保存します。テストコマンド（例: `pnpm install --frozen-lockfile && pnpm test`）は任意です。
+4. Office の右パネルからその Project にタスクを依頼します。Run に **Claude Code（サブスク）** と表示されます。
+5. Draft PR ができたら、リポジトリの `ai/run-…` ブランチを確認し、良ければ **人が** マージします。
+
+**利用上限に達したとき:** Run は失敗にせず **一時停止（判断待ち）** になり、承認画面に「Claude の利用上限に達したため一時停止」が出ます（リセット予定時刻つき）。
+上限がリセットされた後に **「続行（止まった工程から再開）」** を押すと、止まった工程からやり直します（計画からやり直したい場合は差し戻し、やめる場合は却下）。
+
+Claude Code の起動方法（工程ごとに `claude -p` を 1 回呼びます。オプションはすべて公式ドキュメント記載のもの）:
+
+| 設定 | 目的 |
+|---|---|
+| `--restricted` | シェル等のコマンド実行ツールと WebFetch を外し、ファイル操作を作業ディレクトリ（Run 専用の worktree）に限定。利用者・リポジトリの設定ファイル（hooks・権限・`.mcp.json`）を読まない |
+| `--tools Read,Grep,Glob`（Developer のみ `+Edit,Write`） | 工程ごとに必要なツールだけ渡す。Planner / Reviewer は読み取りのみ |
+| `--disallowedTools mcp__*` / `--strict-mcp-config` | MCP ツール（外部サービス連携）を使わせない |
+| `--settings`（hooks 無効・自動メモリ無効・作業ディレクトリ外の読み取り禁止・拒否ルール） | `.env` などの秘密ファイルの読み取り、CI 設定・git フック・`.claude/`・`CLAUDE.md`・`.mcp.json` の変更を拒否 |
+| `--json-schema` | 計画・レビュー結果を決まった JSON で受け取り、Zod で再検証 |
+| `--no-session-persistence` / `--max-turns` | 会話履歴を残さない・ターン数の上限 |
+| 子プロセスの環境変数 | `ANTHROPIC_*` などの秘密値を渡さない（API キーがあると Claude Code はサブスクより API 課金を優先するため） |
+| 実行開始時の確認 | CLI が API キー（`apiKeySource`）で動こうとしたら止める（`PAW_CLAUDE_CODE_ALLOW_API_BILLING=1` で許可） |
+| 実行後の検査 | 変更されたファイルを `git status` で調べ、禁止パスへの変更があればその試行の変更をすべて破棄して失敗にする（CLI 側の設定に頼らない最終確認） |
+
+**確認できていること・いないこと:** この開発環境では本物の `claude` を呼べない（利用者のサブスクで動かせない）ため、公式ドキュメントの出力形式（`stream-json` の init / assistant / rate_limit_event / result）を再現した**偽の CLI でのテストまで**です。
+お手元の Pro アカウントでの実際の動作（特に `--restricted` でサブスクのログインが使えるか、利用上限時に CLI が実際に出す内容）は未確認です。
+もし `--restricted` で問題が出る場合は `PAW_CLAUDE_CODE_RESTRICTED=0` で無効化できます（その場合も `--setting-sources user` でリポジトリ側の設定は読みません）。
+Windows は未対応です（macOS / Linux を想定）。
+
+### B. API キー（Claude API）で動かす
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 ```bash
-pnpm dev
+PAW_AGENT_RUNTIME=claude pnpm dev
 ```
 
-2. **Projects** で、対象 Project の「Claude が作業するローカルリポジトリ」に git リポジトリの絶対パスを入れて保存します。テストコマンド（例: `pnpm install --frozen-lockfile && pnpm test`）は任意です。
-3. Office の右パネルからその Project にタスクを依頼します。島のカードに **CLAUDE**、Run に **Claude · claude-opus-5-5** と表示されます。
-4. Draft PR ができたら、リポジトリの `ai/run-…` ブランチを確認し、良ければ **人が** マージします。承認画面の Approve でその Run は完了になります（自動マージはしません）。
+（サブスクでログインした Claude Code が無い環境では `PAW_AGENT_RUNTIME` の指定は不要です。）
 
-| 役割 | Claude の使い方 |
-|---|---|
-| Planner | Messages API の構造化出力で計画（進め方・変更予定ファイル・受入条件・リスク・要確認事項）を返す。要件が曖昧なら「判断が必要」で停止 |
-| Developer | Messages API のツール呼び出しループ。使えるツールは `list_files` / `read_file` / `search_code` / `write_file` / `edit_file` のみで、すべて Tool Broker のポリシー判定と worktree 内へのパス制限を通る |
-| Tester | Claude は使わず、Project に設定したテストコマンドを worktree で実行（シェルを介さない・秘密値の環境変数は渡さない） |
-| Reviewer | Messages API の構造化出力で受入条件との照合・blocker・nit を返す。blocker があれば Developer に差し戻す（AI の判定は人の承認の代わりにならない） |
+### 役割ごとの Claude の使い方
 
-安全のための制限:
-- 作業は Run ごとの git worktree（`.data/worktrees/<run>`、ブランチ `ai/run-…`）の中だけ。リポジトリ外・`.git`・`node_modules`・秘密情報らしいファイル（`.env`, `*.pem` など）・CI 設定や git フックは読み書きできません。Developer はシェルを実行できません。
+| 役割 | Claude Code（サブスク） | Claude API |
+|---|---|---|
+| Planner | `claude -p --json-schema`（読み取りのみ）で計画（進め方・変更予定ファイル・受入条件・リスク・要確認事項）を返す | Messages API の構造化出力 |
+| Developer | `claude -p`（Read / Grep / Glob / Edit / Write のみ・シェルなし）で worktree のファイルを変更 | Messages API のツール呼び出しループ（`list_files` / `read_file` / `search_code` / `write_file` / `edit_file`。1 回ずつ Tool Broker が判定） |
+| Tester | Claude は使わず、Project に設定したテストコマンドを worktree で実行（シェルを介さない・秘密値の環境変数は渡さない） | 同左 |
+| Reviewer | `claude -p --json-schema`（読み取りのみ）で受入条件との照合・blocker・nit を返す。blocker があれば Developer に差し戻す | Messages API の構造化出力 |
+
+安全のための制限（共通）:
+- 作業は Run ごとの git worktree（`.data/worktrees/<run>`、ブランチ `ai/run-…`）の中だけ。リポジトリ外・`.git`・`node_modules`・秘密情報らしいファイル（`.env`, `*.pem` など）・CI 設定や git フック・AI エージェント設定（`.claude/`・`CLAUDE.md`・`.mcp.json`）は変更できません。Developer はシェルを実行できません。
 - 依頼本文・Issue・リポジトリの内容は非信頼入力として区切って渡し、その中の指示ではツールや権限は変わりません。
 - テストコマンドはあなたのマシンでそのまま実行されます（コンテナ隔離はローカル版では未実装）。信頼できるリポジトリにだけ設定してください。Developer が書いたコードやパッケージのスクリプトもテスト時に実行されます。
-- Run・月の予算、同時実行数、キルスイッチは Claude 実行にも適用されます。費用は API が返したトークン数（実測）× 公開単価で記録し、Run 予算を超えた時点で停止します。Claude の作業は既定の Run 予算（$2）を超えることがあるので、設定で調整してください。
-- Claude が応答を拒否した場合（refusal）は再試行せず失敗にします。Anthropic のサーバー側フォールバック（`fallbacks: "default"`）を有効にしているため、拒否時は Anthropic が別モデルでの再実行を試みます。
+- Run・月の予算、同時実行数、キルスイッチは Claude 実行にも適用されます。Claude API の費用は API が返したトークン数（実測）× 公開単価で記録します。サブスク枠での実行は API の請求が無いため費用 $0 として記録し、トークン数と「API 換算の目安」だけをログに残します（予算では止まりません。プランの利用上限で一時停止します）。
+- Claude が応答を拒否した場合（refusal）は再試行せず失敗にします。
 - 変更の無かった Run のブランチは片付け、コミットのあるブランチはレビューのため残します。
 
 環境変数:
 
 | 変数 | 既定値 | 内容 |
 |---|---|---|
-| `PAW_AGENT_RUNTIME` | `auto` | `auto`（API キーがあれば Claude）/ `claude` / `simulated` |
-| `PAW_CLAUDE_MODEL` | `claude-opus-5-5` | 使用するモデル |
-| `PAW_CLAUDE_EFFORT` | `high` | `low` / `medium` / `high` / `xhigh` / `max` |
+| `PAW_AGENT_RUNTIME` | `auto` | `auto`（サブスクの Claude Code → API キー → シミュレーションの順）/ `claude-code` / `claude` / `simulated` |
+| `PAW_CLAUDE_CODE_BIN` | `claude` | Claude Code CLI のパス |
+| `PAW_CLAUDE_CODE_MODEL` | （CLI の既定） | `opus` / `sonnet` などのエイリアスかモデル名。プランで使えるモデルは CLI 側が決めます |
+| `PAW_CLAUDE_CODE_EFFORT` | （CLI の既定） | `low` / `medium` / `high` / `xhigh` / `max` |
+| `PAW_CLAUDE_CODE_MAX_TURNS` | `60` | Developer 1 回あたりのターン上限（Planner / Reviewer は `PAW_CLAUDE_CODE_PLAN_MAX_TURNS` / `PAW_CLAUDE_CODE_REVIEW_MAX_TURNS`、既定 30） |
+| `PAW_CLAUDE_CODE_RESTRICTED` | `1` | `0` で `--restricted` を使わない |
+| `PAW_CLAUDE_CODE_ALLOW_API_BILLING` | `0` | `1` で Claude Code が API キーで動くことを許可 |
+| `PAW_CLAUDE_MODEL` | `claude-opus-5-5` | Claude API で使うモデル |
+| `PAW_CLAUDE_EFFORT` | `high` | Claude API の effort |
+| `PAW_CLAUDE_STEP_TIMEOUT_MS` | `1800000` | Claude で実行する工程 1 つのタイムアウト（30 分） |
 | `PAW_TEST_TIMEOUT_MS` | `600000` | テストコマンドのタイムアウト |
 
 ### ブラウザだけで動くデモ
@@ -186,7 +250,7 @@ pnpm webhook:send -- --repo alice/storefront-web --installation <ID> --title "CS
 | Step Functions Standard | `WorkflowEngine`（プロセス内・DB 永続） | 遷移表どおりの状態遷移、楽観ロック、再試行・タイムアウト・予算・同時実行数、再起動時の復旧 |
 | API Gateway + Lambda（Webhook 検証） | `POST /integrations/github/webhook` | raw body の HMAC-SHA256 を定数時間比較、サイズ・ヘッダー検証 |
 | SQS + DLQ / Lambda Dispatcher | `webhook_deliveries` テーブル（永続キュー）+ `Dispatcher` | `provider + delivery_id` の一意制約で冪等化。5 回失敗で dead_letter |
-| ECS Fargate + OpenAI Agents SDK / Codex SDK | `ClaudeRunner`（Claude API・`@anthropic-ai/sdk`）+ Run ごとの git worktree。キー未設定・ローカルリポジトリ未指定時は `SimulatedRunner` | `apps/api/src/agents/claude/`。コンテナ隔離は未実装 |
+| ECS Fargate + OpenAI Agents SDK / Codex SDK | `ClaudeRunner` + Run ごとの git worktree。モデル呼び出しは `ClaudeCodeBackend`（この PC の Claude Code CLI・サブスク）か `ClaudeApiBackend`（Claude API）。どちらも使えない・ローカルリポジトリ未指定時は `SimulatedRunner` | `apps/api/src/agents/claude/`。コンテナ隔離は未実装 |
 | GitHub App / Tool Broker | GitHub シミュレーター + `authorizeTool` | 本番と同じ署名付き Webhook 経路。Tool Broker は接続 Repo・`ai/` ブランチ・Draft のみ許可、マージ・Secrets 等は常に拒否 |
 | S3 Artifacts | `.data/artifacts/workspaces/<ws>/runs/<run>/…` | 取得は API で所有権確認後のみ。sha256 チェックサムを検証 |
 | SSE / ポーリング | 同じ | `GET /v1/events/stream`（Last-Event-ID で差分再送）、失敗時は 3 秒ポーリングに切替 |
@@ -221,7 +285,10 @@ docs/           要求定義書・要件定義書・基本設計書
 | AT-010 | Runner の異常終了・テスト失敗の再試行に上限、Run 予算超過で停止、月間予算超過で新規 Run を拒否 |
 | その他 | FR-001（未認証 401）、CSRF、同時実行数、中止とキルスイッチ、Idempotency-Key、プロセス再起動からの復旧、イベント連番、シミュレーター経由の Workspace 越境防止 |
 
-`apps/api/src/claude.test.ts`（Claude 実行基盤）: Claude API の代わりに台本どおり応答する偽クライアントを注入し、一時ディレクトリの実 git リポジトリで検証します。
+`apps/api/src/claude-code.test.ts`（Claude Code・サブスク実行基盤）: 公式ドキュメントの `stream-json` 形式を再現した偽の `claude` CLI を使い、一時ディレクトリの実 git リポジトリで検証します。
+起動オプション（`--restricted`・ツール制限・hooks 無効・拒否ルール・JSON スキーマ）、API キー等を子プロセスに渡さないこと、`ai/` ブランチへのコミット、CI 設定・`.claude/` への変更の破棄、利用上限での一時停止と「続行」で同じ工程から再開すること、未ログイン・CLI 不在・API キー課金の検出、異常終了の上限付き再試行、中止時に CLI プロセスを止めること、起動時の自動判定（サブスク優先）を確認しています。**本物の Claude Code・サブスクでの動作は未確認です。**
+
+`apps/api/src/claude.test.ts`（Claude API 実行基盤）: Claude API の代わりに台本どおり応答する偽クライアントを注入し、一時ディレクトリの実 git リポジトリで検証します。
 ローカルリポジトリの検証、worktree 外・秘密ファイル・CI 設定へのアクセス拒否、`ai/` ブランチへのコミット、構造化出力・フォールバック設定、実測トークンによる費用、refusal と SDK エラーを再試行しないこと、要件確認からの再計画、変更の無い Run のブランチ片付けを確認しています。**実際の Claude API への接続は、この開発環境に API キーが無いため未確認です。**
 
 `packages/office-model` には 3D 表示状態の投影ロジックの単体テストがあります。
@@ -232,11 +299,13 @@ docs/           要求定義書・要件定義書・基本設計書
 
 - **論理 Agent と席**: Agent 定義は Workspace 単位（ER 図どおり）。3D では Project ごとに 4 席として投影し、その Project の Run から状態を出しています（表示キャラ数 ≠ 実行数）。
 - **承認の種類**: `pr_review` と `dangerous_operation` に加え、UC-05（要件不足・再修正上限超過）のために `clarification` を追加しました。
-- **Run 状態遷移**: 利用者の中止はすべての非終端状態から可能にしました（FR-037）。`waiting_review → needs_input` は基本設計書 4.3 の「上限超過 → needs_input」に基づきます。
+- **Run 状態遷移**: 利用者の中止はすべての非終端状態から可能にしました（FR-037）。`waiting_review → needs_input` は基本設計書 4.3 の「上限超過 → needs_input」に基づきます。サブスクの利用上限で工程を一時停止・再開するため、`validating → needs_input` と `needs_input → running / validating` を追加しました（ご要望による）。
 - **Draft PR のレビュー**: 仕様どおり GitHub 側で行う前提のため、承認 API では受け付けません（409）。ローカルでは承認画面のボタンが GitHub シミュレーター経由で署名付きレビュー Webhook を送ります。
 - **Repo 未接続の Project には依頼できません**（Draft PR を作れないため 422）。
 - **同時実行数の既定値**は新規ワークスペースで 2（NFR-018 の例）。デモの alice は見栄えのため 4、予算は $200。
-- **AI 実行基盤は Claude を採用**（仕様書の OpenAI Agents SDK / Codex SDK の代わり）。Developer は Claude Agent SDK ではなく Messages API のツール呼び出しで実装しました。ファイル操作を 1 回ずつ Tool Broker で判定できるためです。
+- **AI 実行基盤は Claude を採用**（仕様書の OpenAI Agents SDK / Codex SDK の代わり）。サブスクで動かすため、利用者がログイン済みの Claude Code CLI（`claude -p`）を呼ぶ方式を追加し、auto ではこちらを優先します。Claude Agent SDK のドキュメントには「承認なしに第三者の製品で claude.ai ログインを提供してはならない」とあるため、**この方式は自分の PC で自分のログインを使う個人利用に限る前提**です（他の人に提供するサービスやクラウド版では API キー等を使います）。
+- Claude API で動かす場合の Developer は、Claude Agent SDK ではなく Messages API のツール呼び出しで実装しました。ファイル操作を 1 回ずつ Tool Broker で判定できるためです。Claude Code で動かす場合はファイル操作を CLI が行うため、工程開始時に Tool Broker でツールの許可を判定し、CLI の権限設定で制限したうえで、実行後に変更パスを検査します。
+- 以前の版では工程のタイムアウトが一律 2 分で、Claude の Developer 工程がほぼ確実にタイムアウトする不具合がありました。Claude で実行する Run は 30 分（`PAW_CLAUDE_STEP_TIMEOUT_MS`）に分けました。
 - シミュレーション Run の費用はシミュレーション単価（$3 / $12 per 1M tokens）による推定値です。Claude Run は実測トークン × 公開単価です。
 - Installation ID / Repository ID はローカルで擬似的に採番しています（実 GitHub とは異なり、同じ Repo を 2 人が接続しても Installation は別扱い）。
 
@@ -249,7 +318,8 @@ docs/           要求定義書・要件定義書・基本設計書
 
 ## 確認したいこと
 
-- Claude の実行は、この開発環境に API キーが無いため、台本どおりに応答する偽クライアントでのテストまでしか確認できていません。お手元でキーを設定して 1 件試していただけますか。
+- Claude Code（サブスク）での実行は、偽の CLI でのテストまでしか確認できていません。お手元で `pnpm dev` → 小さなリポジトリで 1 件試していただけますか。設定 → AI 実行基盤に「Claude Code（サブスク）」と出るか、Run が Draft PR まで進むかを確認したいです。うまくいかない場合は、Run 詳細のログ（エラーコード）を教えてください。
+- Pro プランの Claude Code で使えるモデル（Opus が使えるか）は公式ページで確認できなかったため、既定では CLI に任せています。モデルを固定したい場合は `PAW_CLAUDE_CODE_MODEL` で指定できます。
 - 次に GitHub への実接続（push と Draft PR 作成）を進めてよいか。
 - ローカル版で次に本物にしたい部分の優先順位（例: 実 GitHub App 連携 → 実 Runner → Cognito）。
 - 自動起動の条件は `ai:ready` ラベル方式（O-04 の仮置き）で確定して良いか。

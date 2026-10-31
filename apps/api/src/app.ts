@@ -18,7 +18,10 @@ import { WorkflowEngine } from './workflow/engine';
 import { SimulatedRunner } from './agents/simulated';
 import type { AgentRunner } from './agents/runner';
 import { RunnerRouter } from './agents/router';
-import { ClaudeRunner, type ClaudeMessagesClient } from './agents/claude/runner';
+import { ClaudeRunner } from './agents/claude/runner';
+import { ClaudeApiBackend, type ClaudeMessagesClient } from './agents/claude/apiBackend';
+import { ClaudeCodeBackend } from './agents/claude/cliBackend';
+import { removeWorktree } from './agents/claude/git';
 import { Dispatcher } from './github/dispatcher';
 import { MAX_WEBHOOK_BYTES, receiveGithubWebhook } from './github/webhook';
 import { SeatWatcher } from './services/office';
@@ -54,19 +57,32 @@ export async function createServices(
   opts: { runner?: AgentRunner; claudeClient?: ClaudeMessagesClient } = {},
 ): Promise<Services> {
   setLogLevel(config.logLevel);
+  const common = { worktreesDir: config.worktreesDir, testTimeoutMs: config.testTimeoutMs };
   const runner =
     opts.runner ??
     new RunnerRouter(
       new SimulatedRunner({ randomFailures: config.simRandomFailures }),
-      config.agentRuntime === 'claude'
-        ? new ClaudeRunner({
-            model: config.claudeModel,
-            effort: config.claudeEffort,
-            worktreesDir: config.worktreesDir,
-            testTimeoutMs: config.testTimeoutMs,
-            client: opts.claudeClient,
-          })
-        : null,
+      {
+        api:
+          config.agentRuntime === 'claude'
+            ? new ClaudeRunner({ ...common, backend: new ClaudeApiBackend({ model: config.claudeModel, effort: config.claudeEffort, client: opts.claudeClient }) })
+            : null,
+        code:
+          config.agentRuntime === 'claude_code'
+            ? new ClaudeRunner({
+                ...common,
+                backend: new ClaudeCodeBackend({
+                  bin: config.claudeCode.bin,
+                  model: config.claudeCode.model,
+                  effort: config.claudeCode.effort,
+                  restricted: config.claudeCode.restricted,
+                  allowApiBilling: config.claudeCode.allowApiBilling,
+                  maxTurns: config.claudeCode.maxTurns,
+                }),
+              })
+            : null,
+      },
+      (runId, localRepoPath, branch) => removeWorktree(localRepoPath, resolve(config.worktreesDir, runId), branch).catch(() => undefined),
     );
   const { db, client } = await openDb(config.dataDir);
   const bus = new EventBus(db);

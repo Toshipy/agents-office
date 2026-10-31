@@ -6,7 +6,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
-import { APPROVAL_TYPE_LABEL, ROLE_LABEL, type AgentRole } from '@paw/contracts';
+import { APPROVAL_TYPE_LABEL, ROLE_LABEL, STEP_KEY_LABEL, type AgentRole, type StepKey } from '@paw/contracts';
 import { ApiError, api, newIdempotencyKey, type ApprovalDto } from '../../shared/api/client';
 import { useAuthConfig } from '../../shared/api/authConfig';
 import { Icon } from '../../shared/ui/Icon';
@@ -35,6 +35,9 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
   const pending = a.status === 'pending';
   const p = a.payload;
   const devRoutes = useAuthConfig().data?.devRoutes ?? false;
+  const usageLimit = a.actionType === 'clarification' && p.reason === 'usage_limit';
+  const resetsAt = usageLimit && typeof p.resetsAt === 'string' ? new Date(p.resetsAt) : null;
+  const beforeReset = resetsAt !== null && resetsAt.getTime() > Date.now();
 
   const submit = async () => {
     if (!action) return;
@@ -127,12 +130,36 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
             <blockquote className="excerpt">{String(p.requestExcerpt ?? '')}</blockquote>
             <p className="hint warn">{String(p.note ?? '')}</p>
           </>
-        ) : (
+        ) : usageLimit ? (
+          <>
+            <p>{String(p.message ?? 'Claude の利用上限に達しました')}</p>
+            <dl className="kv cols">
+              <div>
+                <dt>止まった工程</dt>
+                <dd>{STEP_KEY_LABEL[p.stepKey as StepKey] ?? String(p.stepKey ?? '—')}</dd>
+              </div>
+              <div>
+                <dt>リセット予定</dt>
+                <dd>{resetsAt ? resetsAt.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '不明（CLI から取得できず）'}</dd>
+              </div>
+            </dl>
+            {beforeReset ? <p className="hint warn">リセット前に続行すると、再び上限で一時停止します。</p> : null}
+            <p className="hint">{String(p.note ?? '')}</p>
+          </>
+        ) : p.reason === 'revision_limit' ? (
           <>
             <p>
-              再修正 {p.revisionCount} / {p.maxRevisionAttempts} 回に達しました。
+              再修正 {String(p.revisionCount)} / {String(p.maxRevisionAttempts)} 回に達しました。
             </p>
             {p.lastReviewComment ? <blockquote className="excerpt">{String(p.lastReviewComment)}</blockquote> : null}
+            <p className="hint">{String(p.note ?? '')}</p>
+          </>
+        ) : (
+          <>
+            <ul className="questions">
+              {(p.questions as string[] | undefined)?.map((qq) => <li key={qq}>{qq}</li>)}
+            </ul>
+            {p.requestExcerpt ? <blockquote className="excerpt">{String(p.requestExcerpt)}</blockquote> : null}
             <p className="hint">{String(p.note ?? '')}</p>
           </>
         )}
@@ -163,10 +190,11 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
                 title={a.actionType === 'dangerous_operation' ? 'MVP では危険操作は承認しても実行できません' : undefined}
                 onClick={() => setAction({ kind: 'decision', decision: 'approve' })}
               >
-                <Icon name={a.actionType === 'dangerous_operation' ? 'lock' : 'check'} size={14} /> 承認して続行
+                <Icon name={a.actionType === 'dangerous_operation' ? 'lock' : 'check'} size={14} /> {usageLimit ? '続行（止まった工程から再開）' : '承認して続行'}
               </button>
               <button className="btn" onClick={() => setAction({ kind: 'decision', decision: 'request_changes' })}>
-                <Icon name="refresh" size={14} /> {a.actionType === 'dangerous_operation' ? '安全な範囲で再計画' : '差し戻し（指示を追加）'}
+                <Icon name="refresh" size={14} />{' '}
+                {a.actionType === 'dangerous_operation' ? '安全な範囲で再計画' : usageLimit ? '差し戻し（計画からやり直す）' : '差し戻し（指示を追加）'}
               </button>
               <button className="btn danger" onClick={() => setAction({ kind: 'decision', decision: 'reject' })}>
                 <Icon name="x" size={14} /> 却下
@@ -182,9 +210,13 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
       )}
 
       {action && key ? (
-        <Modal title={ACTION_TEXT[key].label} onClose={() => setAction(null)}>
+        <Modal title={(usageLimit && key === 'approve' ? '続行（止まった工程から再開）' : ACTION_TEXT[key].label)} onClose={() => setAction(null)}>
           <div className="confirm">
-            <p>{ACTION_TEXT[key].confirm}</p>
+            <p>
+              {usageLimit && key === 'approve'
+                ? `止まった工程から再開します。${beforeReset ? 'まだ利用上限のリセット前のため、再び一時停止する可能性があります。' : ''}`
+                : ACTION_TEXT[key].confirm}
+            </p>
             <dl className="kv">
               <div>
                 <dt>対象</dt>
@@ -208,7 +240,7 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
                 キャンセル
               </button>
               <button className={`btn ${ACTION_TEXT[key].tone}`} disabled={busy || (needsComment && !comment.trim())} onClick={() => void submit()}>
-                <Icon name={ACTION_TEXT[key].icon} size={14} /> {busy ? '送信中…' : ACTION_TEXT[key].label}
+                <Icon name={ACTION_TEXT[key].icon} size={14} /> {busy ? '送信中…' : (usageLimit && key === 'approve' ? '続行（止まった工程から再開）' : ACTION_TEXT[key].label)}
               </button>
             </div>
           </div>

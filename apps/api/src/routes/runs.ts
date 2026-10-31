@@ -137,7 +137,12 @@ export function registerRunRoutes(app: Hono<AppEnv>, s: Services) {
         pr: run.pr,
         branch: branchFor(run.id),
         runtime: run.runtime,
-        model: run.runtime === 'claude' ? s.config.claudeModel : 'simulated-local',
+        model:
+          run.runtime === 'claude'
+            ? s.config.claudeModel
+            : run.runtime === 'claude_code'
+              ? (usageRows.find((u) => u.model !== 'claude-code')?.model ?? s.config.claudeCode.model ?? 'Claude Code の既定モデル')
+              : 'simulated-local',
         errorMessage: run.errorMessage,
         durationMs,
       },
@@ -163,7 +168,13 @@ export function registerRunRoutes(app: Hono<AppEnv>, s: Services) {
       approvals: approvalRows.map((ap) => ({ ...ap, expiresAt: ap.expiresAt.toISOString(), decidedAt: ap.decidedAt?.toISOString() ?? null, createdAt: ap.createdAt.toISOString() })),
       artifacts: artifactRows.map((ar) => ({ id: ar.id, kind: ar.kind, title: ar.title, stepId: ar.stepId, mediaType: ar.mediaType, sizeBytes: ar.sizeBytes, checksum: ar.checksum, createdAt: ar.createdAt.toISOString() })),
       usage: {
-        measurement: usageRows.length && usageRows.every((u) => u.measurement === 'measured') ? 'measured' : 'estimated',
+        measurement: !usageRows.length
+          ? 'estimated'
+          : usageRows.every((u) => u.measurement === 'measured')
+            ? 'measured'
+            : usageRows.every((u) => u.measurement === 'subscription')
+              ? 'subscription'
+              : 'estimated',
         inputTokens: usageRows.reduce((x, u) => x + u.inputTokens, 0),
         outputTokens: usageRows.reduce((x, u) => x + u.outputTokens, 0),
         estimatedCostUsd: usageRows.reduce((x, u) => x + u.estimatedCostUsd, 0),

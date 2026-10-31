@@ -13,6 +13,7 @@ import { duration, fmtNum, relTime, usd } from '../../shared/ui/format';
 import { toast } from '../../shared/ui/toast';
 import { useOffice } from '../../shared/state/office';
 import { ApprovalCard } from '../approvals/ApprovalCard';
+import { isClaudeRuntime, runtimeLabel } from '../../shared/runtime';
 
 type Tab = 'steps' | 'artifacts' | 'events';
 
@@ -89,8 +90,8 @@ export function RunDetailPage() {
                 {d.project.name}
               </span>
             ) : null}
-            <span className={`runtime-pill ${run.runtime}`} title={run.runtime === 'claude' ? `Claude（${run.model ?? ''}）がローカルリポジトリで実行` : 'ローカルシミュレーション'}>
-              {run.runtime === 'claude' ? `Claude · ${run.model ?? ''}` : 'シミュレーション'}
+            <span className={`runtime-pill ${run.runtime}`} title={isClaudeRuntime(run.runtime) ? `${runtimeLabel(run.runtime)}（${run.model ?? ''}）がローカルリポジトリで実行` : 'ローカルシミュレーション'}>
+              {isClaudeRuntime(run.runtime) ? `${runtimeLabel(run.runtime)} · ${run.model ?? ''}` : 'シミュレーション'}
             </span>
             <span className="mono faint small">{run.id}</span>
           </div>
@@ -150,7 +151,7 @@ export function RunDetailPage() {
           </dl>
           {run.pr ? (
             <p className="hint">
-              {run.runtime === 'claude'
+              {isClaudeRuntime(run.runtime)
                 ? `ローカルリポジトリ（${d.repository?.localPath ?? ''}）のブランチ ${run.branch} に変更があります。確認してから人がマージしてください（AI はマージできません）。`
                 : 'PR はローカル GitHub シミュレーター上の Draft です。マージは人が行います（AI はマージできません）。'}
             </p>
@@ -158,7 +159,7 @@ export function RunDetailPage() {
         </section>
         <section className="card">
           <h3 className="card-title">
-            <Icon name="dollar" size={15} /> 利用量（{d.usage.measurement === 'measured' ? '実測トークン' : '推定'}）
+            <Icon name="dollar" size={15} /> 利用量（{d.usage.measurement === 'measured' ? '実測トークン' : d.usage.measurement === 'subscription' ? 'サブスク枠' : '推定'}）
           </h3>
           <dl className="kv cols">
             <div>
@@ -179,7 +180,13 @@ export function RunDetailPage() {
             </div>
           </dl>
           <p className="hint">
-            {d.usage.measurement === 'measured' ? 'Claude API が返したトークン数 × 公開単価で計算しています。' : 'シミュレーション単価による推定です（実際のモデル料金ではありません）。'}
+            {d.usage.measurement === 'measured'
+              ? 'Claude API が返したトークン数 × 公開単価で計算しています。'
+              : d.usage.measurement === 'subscription'
+                ? 'Claude Code をサブスクの利用枠で実行したため API の請求はありません（費用 $0）。トークン数は CLI が報告した値です。'
+                : run.runtime === 'claude_code'
+                  ? 'Claude Code が報告した API 換算の推定額です（API キーで動いた場合）。'
+                  : 'シミュレーション単価による推定です（実際のモデル料金ではありません）。'}
           </p>
         </section>
         <section className="card">

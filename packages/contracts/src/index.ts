@@ -65,16 +65,18 @@ export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = [
  * 追加点（文書から導出したもの）:
  *  - 利用者による中止（FR-037）は非終端の全状態から cancelled へ遷移可能
  *  - waiting_review → needs_input は基本設計書 4.3「上限超過 → needs_input / escalated」に基づく
+ *  - validating → needs_input / needs_input → running・validating は、Claude のサブスク利用上限で
+ *    工程を一時停止し、人の「続行」でその工程から再開するための追加（利用者の要望による）
  */
 export const RUN_TRANSITIONS: Record<RunStatus, readonly RunStatus[]> = {
   queued: ['planning', 'cancelled'],
   planning: ['running', 'needs_input', 'failed', 'cancelled'],
   running: ['validating', 'needs_input', 'failed', 'cancelled'],
-  validating: ['pr_ready', 'running', 'failed', 'cancelled'],
+  validating: ['pr_ready', 'running', 'needs_input', 'failed', 'cancelled'],
   pr_ready: ['waiting_review', 'failed', 'cancelled'],
   waiting_review: ['revising', 'approved', 'needs_input', 'cancelled'],
   revising: ['running', 'failed', 'cancelled'],
-  needs_input: ['planning', 'cancelled'],
+  needs_input: ['planning', 'running', 'validating', 'cancelled'],
   approved: ['completed'],
   completed: [],
   failed: [],
@@ -361,6 +363,13 @@ export interface ProjectViewModel {
   stats: ProjectStats;
 }
 
+/** AI 実行基盤。claude = Claude API（API キー・従量課金）、claude_code = Claude Code CLI（ログイン済みのサブスク等）、simulated = ローカルシミュレーション */
+export const AGENT_RUNTIMES = ['claude', 'claude_code', 'simulated'] as const;
+export type AgentRuntime = (typeof AGENT_RUNTIMES)[number];
+
+/** 利用量の計測方法。subscription = サブスク枠で実行（API 課金なし。トークン数のみ記録） */
+export type UsageMeasurement = 'measured' | 'estimated' | 'subscription' | 'unmeasured';
+
 export interface RunSummary {
   id: string;
   projectId: string;
@@ -368,8 +377,8 @@ export interface RunSummary {
   status: RunStatus;
   statusVersion: number;
   sourceType: 'manual' | 'github_issue';
-  /** AI 実行基盤（claude / simulated） */
-  runtime: 'claude' | 'simulated';
+  /** AI 実行基盤（claude = Claude API / claude_code = Claude Code CLI（サブスク） / simulated） */
+  runtime: AgentRuntime;
   issueNumber: number | null;
   prNumber: number | null;
   currentStep: { key: StepKey; role: StepRole; status: StepStatus } | null;

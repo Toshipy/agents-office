@@ -5,6 +5,7 @@ import { createApp, createServices } from './app';
 import { DemoTraffic } from './demo/traffic';
 import { log, setLogLevel } from './lib/logger';
 import { seedIfEmpty } from './seed';
+import { resolveAgentRuntime } from './agents/claude/detect';
 
 async function main() {
   const isStart = process.env.npm_lifecycle_event === 'start';
@@ -12,6 +13,8 @@ async function main() {
     serveWebDist: isStart ? resolve(REPO_ROOT, 'apps/web/dist') : null,
   });
   setLogLevel(config.logLevel);
+  await resolveAgentRuntime(config);
+  log.info('agent runtime', { runtime: config.agentRuntime, reason: config.agentRuntimeReason });
   const services = await createServices(config);
   const app = createApp(services);
   if (config.seedDemo) await seedIfEmpty(services);

@@ -7,6 +7,7 @@ import { ApiError, api, type ProjectDto } from '../../shared/api/client';
 import { useAuthConfig } from '../../shared/api/authConfig';
 import { Icon } from '../../shared/ui/Icon';
 import { toast } from '../../shared/ui/toast';
+import { isClaudeRuntime, runtimeLabel } from '../../shared/runtime';
 
 const COLORS = ['#5eead4', '#fb7185', '#a78bfa', '#fbbf24', '#60a5fa', '#34d399', '#f472b6', '#fb923c'];
 
@@ -192,7 +193,7 @@ function ProjectCard({ project: p, onChange }: { project: ProjectDto; onChange()
         <div className="pa-section">
           <h4>
             <Icon name="sparkles" size={14} /> Claude が作業するローカルリポジトリ
-            <span className={`runtime-pill ${p.repository.runtime ?? 'simulated'}`}>{p.repository.runtime === 'claude' ? 'Claude で実行' : 'シミュレーション'}</span>
+            <span className={`runtime-pill ${p.repository.runtime ?? 'simulated'}`}>{isClaudeRuntime(p.repository.runtime) ? `${runtimeLabel(p.repository.runtime)} で実行` : 'シミュレーション'}</span>
           </h4>
           <div className="form-grid">
             <label className="span-2">

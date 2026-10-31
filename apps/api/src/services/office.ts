@@ -153,7 +153,7 @@ export async function buildOfficeState(db: Db, engine: WorkflowEngine, workspace
       repo: b
         ? {
             fullName: b.fullName,
-            claudeReady: engine.runtimeFor(b) === 'claude',
+            claudeReady: engine.runtimeFor(b) !== 'simulated',
             automationEnabled: b.automationEnabled,
             triggerLabel: b.policy.triggerLabel,
             maxRevisionAttempts: b.policy.maxRevisionAttempts,

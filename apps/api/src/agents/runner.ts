@@ -7,7 +7,7 @@
  * で、いずれも同じインターフェースのアダプターとして差し替える（要求定義書 7-7「選択可能性」）。
  * Runner は自分の権限を増やせず、ツール呼び出しは必ず ctx.tool() 経由で Tool Broker の判定を受ける。
  */
-import type { StepKey, StepRole } from '@paw/contracts';
+import type { AgentRuntime, StepKey, StepRole, UsageMeasurement } from '@paw/contracts';
 import type { ArtifactKind, ArtifactRow } from '../workflow/artifactStore';
 
 export interface StepExecutionContext {
@@ -30,7 +30,7 @@ export interface StepExecutionContext {
   previous: Record<string, unknown>;
   pr: { number: number; url: string; branch: string; headSha: string } | null;
   /** この Run の実行基盤（Run 作成時に確定） */
-  runtime: 'claude' | 'simulated';
+  runtime: AgentRuntime;
   /** Project に設定されたローカル git リポジトリ（Claude 実行時に使用） */
   localRepo: { path: string; testCommand: string | null } | null;
   signal: AbortSignal;
@@ -45,7 +45,7 @@ export interface StepExecutionContext {
     inputTokens: number,
     outputTokens: number,
     durationMs: number,
-    extra?: { costUsd?: number; measurement?: 'measured' | 'estimated' },
+    extra?: { costUsd?: number; measurement?: UsageMeasurement },
   ): Promise<void>;
   allocatePrNumber(): Promise<number>;
 }
@@ -76,5 +76,19 @@ export class RunnerError extends Error {
     readonly retryable: boolean,
   ) {
     super(message);
+  }
+}
+
+/**
+ * サブスク（Claude Code）の利用上限に達した。再試行しても上限が戻るまで成功しないため、
+ * エンジンは Run を needs_input にして工程を一時停止し、人の「続行」でその工程から再開する。
+ */
+export class UsageLimitError extends RunnerError {
+  constructor(
+    message: string,
+    /** 上限がリセットされる予定時刻（ISO 8601）。CLI が返さない場合は null */
+    readonly resetsAt: string | null,
+  ) {
+    super(message, 'CLAUDE_USAGE_LIMIT', false);
   }
 }

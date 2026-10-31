@@ -9,6 +9,7 @@ import { api, type ProjectDto, type RunListItem } from '../../shared/api/client'
 import { Icon } from '../../shared/ui/Icon';
 import { ProgressBar, RUN_STATUS_META, RunStatusPill, stepLabel } from '../../shared/ui/status';
 import { relTime, usd } from '../../shared/ui/format';
+import { runtimeLabel } from '../../shared/runtime';
 
 export function RunListPage() {
   const [q, setQ] = useState('');
@@ -109,7 +110,7 @@ export function RunListPage() {
                 <td className="small">
                   {r.sourceType === 'github_issue' ? `GitHub Issue #${r.issueNumber}` : '手動'}
                   <div>
-                    <span className={`runtime-pill ${r.runtime}`}>{r.runtime === 'claude' ? 'Claude' : 'シミュレーション'}</span>
+                    <span className={`runtime-pill ${r.runtime}`}>{runtimeLabel(r.runtime)}</span>
                   </div>
                   {r.prNumber ? <div className="muted">Draft PR #{r.prNumber}</div> : null}
                 </td>

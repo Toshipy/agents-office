@@ -9,6 +9,7 @@ import { Icon } from '../../shared/ui/Icon';
 import { ProgressBar, RUN_STATUS_META, RunStatusPill, stepLabel } from '../../shared/ui/status';
 import { relTime } from '../../shared/ui/format';
 import { TaskComposer } from './TaskComposer';
+import { runtimeTag } from '../../shared/runtime';
 
 type Filter = 'all' | 'active' | 'waiting' | 'queued' | 'done' | 'failed';
 
@@ -83,7 +84,7 @@ export function TaskStatusPanel({ snapshot }: { snapshot: OfficeState }) {
                   ) : null}
                   {r.prNumber ? <span>Draft PR #{r.prNumber}</span> : null}
                   {r.sourceType === 'github_issue' ? <span>Issue #{r.issueNumber}</span> : null}
-                  {r.runtime === 'claude' ? <span className="runtime-tag">Claude</span> : null}
+                  {runtimeTag(r.runtime) ? <span className="runtime-tag">{runtimeTag(r.runtime)}</span> : null}
                   {r.revisionCount > 0 ? <span>rev {r.revisionCount}</span> : null}
                   {r.errorCode ? <span className="err">{r.errorCode}</span> : null}
                 </span>

@@ -127,6 +127,30 @@ export async function commitAll(worktree: string, message: string): Promise<stri
   return (await git(worktree, ['rev-parse', 'HEAD'])).trim();
 }
 
+/**
+ * 作業ツリーで変更・追加・削除されたパス（コミット前）。リネームは新旧両方を返す。
+ * Developer が外部プロセス（Claude Code）でファイルを編集した後の検証に使う。
+ */
+export async function changedPaths(worktree: string): Promise<string[]> {
+  const out = await git(worktree, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames']);
+  const entries = out.split('\0').filter(Boolean);
+  const paths: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    const xy = e.slice(0, 2);
+    paths.push(e.slice(3));
+    // --no-renames でも念のため: R/C の次の要素は元のパス
+    if (xy.includes('R') || xy.includes('C')) paths.push(entries[++i] ?? '');
+  }
+  return paths.filter(Boolean);
+}
+
+/** コミットされていない変更をすべて破棄する（禁止パスの変更を検出したとき用） */
+export async function discardChanges(worktree: string) {
+  await git(worktree, ['reset', '--hard', '-q', 'HEAD']);
+  await git(worktree, ['clean', '-fdq']);
+}
+
 export async function headSha(worktree: string): Promise<string> {
   return (await git(worktree, ['rev-parse', 'HEAD'])).trim();
 }
@@ -144,10 +168,46 @@ export async function diffFromBase(worktree: string, baseSha: string): Promise<{
   return { patch, files };
 }
 
-const DENY_SEGMENTS = new Set(['.git', 'node_modules', '.husky', '.circleci']);
+/**
+ * .claude/ は Claude Code の設定（hooks・権限）を置く場所。AI に書き換えさせると、後続の工程や
+ * 利用者自身の Claude Code セッションでコードが実行され得るため変更させない。
+ */
+const DENY_SEGMENTS = new Set(['.git', 'node_modules', '.husky', '.circleci', '.claude']);
 /** CI・git フックなど、変更すると利用者の環境やパイプラインでコードが実行される場所 */
 const DENY_PREFIXES = ['.github/workflows/', '.gitlab-ci.yml', '.githooks/', '.pre-commit-config.yaml', 'lefthook.yml'];
 const DENY_FILES = /(^|\/)(\.env(\..*)?|.*\.pem|.*\.key|id_rsa.*|id_ed25519.*|\.npmrc|\.netrc|credentials(\.json)?)$/i;
+/** AI への指示・接続先として読み込まれるファイル（プロンプトインジェクションの持続化を防ぐ） */
+const DENY_AGENT_FILES = /(^|\/)(CLAUDE(\.local)?\.md|\.mcp\.json)$/;
+
+/**
+ * Claude Code に渡す権限ルール（gitignore 形式。上の confine() と同じ範囲を表す）。
+ * CLI 側の拒否は早めに止めるためのもので、最終的な判定は実行後の changedPaths() + confine() で行う。
+ */
+export const CLAUDE_CODE_DENY_RULES = [
+  'Edit(.git/**)',
+  'Edit(node_modules/**)',
+  'Edit(.husky/**)',
+  'Edit(.circleci/**)',
+  'Edit(.claude/**)',
+  'Edit(.github/workflows/**)',
+  'Edit(.gitlab-ci.yml)',
+  'Edit(.githooks/**)',
+  'Edit(.pre-commit-config.yaml)',
+  'Edit(lefthook.yml)',
+  'Edit(CLAUDE.md)',
+  'Edit(CLAUDE.local.md)',
+  'Edit(.mcp.json)',
+  'Read(.env)',
+  'Read(.env.*)',
+  'Read(*.pem)',
+  'Read(*.key)',
+  'Read(id_rsa*)',
+  'Read(id_ed25519*)',
+  'Read(.npmrc)',
+  'Read(.netrc)',
+  'Read(credentials)',
+  'Read(credentials.json)',
+];
 
 /**
  * モデルが指定したパス（非信頼）を worktree 内に限定する。
@@ -160,9 +220,10 @@ export function confine(worktree: string, rel: string): { ok: true; abs: string;
   const r = relative(worktree, abs);
   if (!r || r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r)) return { ok: false, reason: 'リポジトリの外は操作できません' };
   const norm = r.split(sep).join('/');
-  if (norm.split('/').some((seg) => DENY_SEGMENTS.has(seg))) return { ok: false, reason: '.git / node_modules は操作できません' };
+  if (norm.split('/').some((seg) => DENY_SEGMENTS.has(seg))) return { ok: false, reason: '.git / node_modules / .claude などは操作できません' };
   if (DENY_FILES.test(norm)) return { ok: false, reason: '秘密情報を含む可能性のあるファイルは操作できません' };
   if (DENY_PREFIXES.some((p) => norm === p || norm.startsWith(p))) return { ok: false, reason: 'CI 設定・git フックは変更できません' };
+  if (DENY_AGENT_FILES.test(norm)) return { ok: false, reason: 'AI エージェントの設定ファイル（CLAUDE.md / .mcp.json）は変更できません' };
   // 既存部分のシンボリックリンクが worktree 外を指していないか確認
   let probe = abs;
   while (!existsSync(probe) && probe !== worktree) probe = resolve(probe, '..');

@@ -3,6 +3,7 @@
  * エラーは { code, message, requestId } 形式（基本設計書 6.1）。
  */
 import type {
+  AgentRuntime,
   AgentVisualStatus,
   ApprovalActionType,
   ApprovalDecision,
@@ -96,7 +97,7 @@ export interface ProjectDto {
     policy: AutomationPolicy & { triggerLabel: string };
     localPath?: string | null;
     testCommand?: string | null;
-    runtime?: 'claude' | 'simulated';
+    runtime?: AgentRuntime;
   } | null;
 }
 
@@ -193,11 +194,25 @@ export interface AgentDto {
 }
 
 export interface RuntimeInfo {
-  runtime: 'claude' | 'simulated';
+  runtime: AgentRuntime;
+  mode: 'auto' | AgentRuntime;
   reason: string;
-  model: string;
-  effort: string;
-  fallbacks: string;
+  model: string | null;
+  effort: string | null;
+  fallbacks: string | null;
+  billing: 'api' | 'subscription' | 'none';
+  claudeCode: {
+    bin: string;
+    restricted: boolean;
+    allowApiBilling: boolean;
+    maxTurns: { plan: number; review: number; develop: number };
+    version: string | null;
+    loggedIn: boolean | null;
+    authMethod: string | null;
+    authLabel: string | null;
+    problem: string | null;
+  };
+  stepTimeoutMs: number;
   note: string;
 }
 

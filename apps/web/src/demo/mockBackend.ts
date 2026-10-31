@@ -843,7 +843,21 @@ class DemoServer {
     if (method === 'POST' && path === '/v1/auth/logout') return [200, { ok: true }];
     if (method === 'GET' && path === '/v1/me') return [200, { user: USER, workspace: this.wsJson() }];
     if (method === 'GET' && path === '/v1/runtime') {
-      return [200, { runtime: 'simulated', reason: 'ブラウザ内デモのためシミュレーションです', model: 'claude-opus-5-5', effort: 'high', fallbacks: 'default', note: 'ローカル版で ANTHROPIC_API_KEY を設定し、Project にローカルリポジトリを指定すると Claude が作業します。' }];
+      return [
+        200,
+        {
+          runtime: 'simulated',
+          mode: 'simulated',
+          reason: 'ブラウザ内デモのためシミュレーションです',
+          model: null,
+          effort: null,
+          fallbacks: null,
+          billing: 'none',
+          claudeCode: { bin: 'claude', restricted: true, allowApiBilling: false, maxTurns: { plan: 30, review: 30, develop: 60 }, version: null, loggedIn: null, authMethod: null, authLabel: null, problem: null },
+          stepTimeoutMs: 120000,
+          note: 'ローカル版では、この PC の Claude Code にサブスク（claude.ai アカウント）でログインしているか ANTHROPIC_API_KEY を設定し、Project にローカルリポジトリを指定すると Claude が作業します。',
+        },
+      ];
     }
     if (method === 'GET' && path === '/v1/workspaces/me') return [200, this.wsJson()];
     if (method === 'GET' && path === '/v1/workspaces/me/office-state') return [200, this.officeState()];
