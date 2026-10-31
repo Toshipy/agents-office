@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { NavLink, Navigate, Outlet, Route, Routes, useNavigate } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api, type Me } from '../shared/api/client';
+import { useAuthConfig } from '../shared/api/authConfig';
 import { useRealtime } from '../shared/state/realtime';
 import { useOffice } from '../shared/state/office';
 import { Icon } from '../shared/ui/Icon';
@@ -156,7 +157,7 @@ function Shell({ me }: { me: Me }) {
           {(window as unknown as { __PAW_DEMO__?: boolean }).__PAW_DEMO__ ? (
             <span className="local-badge" title="ブラウザだけで動くデモです。AI 実行と GitHub はシミュレーションです">DEMO</span>
           ) : (
-            <span className="local-badge" title="クラウドではなくローカルで動作しています。AI 実行はシミュレーションです">LOCAL</span>
+            <ModeBadge />
           )}
         </div>
         <nav className="nav">
@@ -203,5 +204,14 @@ function Shell({ me }: { me: Me }) {
         <Outlet />
       </main>
     </div>
+  );
+}
+
+function ModeBadge() {
+  const server = useAuthConfig().data?.mode === 'server';
+  return server ? (
+    <span className="local-badge" title="サーバーで常時動作しています">SERVER</span>
+  ) : (
+    <span className="local-badge" title="この PC で動作しています（クラウドではありません）">LOCAL</span>
   );
 }

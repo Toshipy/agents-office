@@ -3033,3 +3033,14 @@ label.check {
 .demo-intro.compact .demo-note {
   font-size: 12.5px;
 }
+
+/* GitHub App 連携の状態 */
+.gh-banner {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 14px;
+}
+.gh-banner p {
+  margin: 2px 0 0;
+}

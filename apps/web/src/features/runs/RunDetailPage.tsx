@@ -140,7 +140,19 @@ export function RunDetailPage() {
             </div>
             <div>
               <dt>Draft PR</dt>
-              <dd className="mono">{run.pr ? `#${run.pr.number}（${run.pr.headSha.slice(0, 7)}）` : '—'}</dd>
+              <dd className="mono">
+                {run.pr ? (
+                  run.pr.url.startsWith('https://') ? (
+                    <a href={run.pr.url} target="_blank" rel="noreferrer">
+                      #{run.pr.number}（{run.pr.headSha.slice(0, 7)}）
+                    </a>
+                  ) : (
+                    `#${run.pr.number}（${run.pr.headSha.slice(0, 7)}）`
+                  )
+                ) : (
+                  '—'
+                )}
+              </dd>
             </div>
             <div>
               <dt>再修正</dt>
@@ -151,7 +163,9 @@ export function RunDetailPage() {
           </dl>
           {run.pr ? (
             <p className="hint">
-              {isClaudeRuntime(run.runtime)
+              {run.pr.url.startsWith('https://')
+                ? 'GitHub の Draft PR でレビューしてください。Approve で完了、Request changes で同じ PR を修正します。マージは人が行います（AI はマージできません）。'
+                : isClaudeRuntime(run.runtime)
                 ? `ローカルリポジトリ（${d.repository?.localPath ?? ''}）のブランチ ${run.branch} に変更があります。確認してから人がマージしてください（AI はマージできません）。`
                 : 'PR はローカル GitHub シミュレーター上の Draft です。マージは人が行います（AI はマージできません）。'}
             </p>

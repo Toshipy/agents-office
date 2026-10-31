@@ -3,7 +3,7 @@
  */
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, api, type ProjectDto } from '../../shared/api/client';
+import { ApiError, api, type GithubInstallationsDto, type ProjectDto } from '../../shared/api/client';
 import { useAuthConfig } from '../../shared/api/authConfig';
 import { Icon } from '../../shared/ui/Icon';
 import { toast } from '../../shared/ui/toast';
@@ -18,8 +18,14 @@ function errMsg(e: unknown) {
 export function ProjectsPage() {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ['projects', 'all'], queryFn: () => api.get<{ items: ProjectDto[] }>('/v1/projects?includeArchived=1') });
+  const gh = useQuery({ queryKey: ['github-installations'], queryFn: () => api.get<GithubInstallationsDto>('/v1/integrations/github/installations') });
   const [creating, setCreating] = useState(false);
-  const refresh = () => qc.invalidateQueries({ queryKey: ['projects'] });
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ['projects'] });
+    void qc.invalidateQueries({ queryKey: ['github-installations'] });
+  };
+  const githubApp = gh.data?.mode === 'github_app';
+  const candidates = githubApp ? (gh.data?.installations ?? []).flatMap((i) => i.repositories.filter((r) => !r.projectId).map((r) => r.fullName)) : [];
   const items = q.data?.items ?? [];
   const active = items.filter((p) => p.status === 'active');
   const archived = items.filter((p) => p.status === 'archived');
@@ -35,10 +41,28 @@ export function ProjectsPage() {
           <Icon name="plus" size={14} /> 新しい Project
         </button>
       </header>
-      {creating ? <CreateProject onDone={() => { setCreating(false); void refresh(); }} /> : null}
+      {githubApp ? (
+        <section className="card gh-banner">
+          <Icon name="git-pr" size={15} />
+          <div>
+            <strong>GitHub App 連携</strong>
+            <p className="small muted">
+              {gh.data?.error
+                ? `GitHub に接続できません: ${gh.data.error}`
+                : `インストール先: ${(gh.data?.installations ?? []).map((i) => i.account).join(', ') || 'なし'} · 起動・レビューを受け付ける GitHub ユーザー: ${gh.data?.allowedUsers?.join(', ') || '未設定（Issue からは起動しません）'}`}
+            </p>
+          </div>
+        </section>
+      ) : null}
+      {creating ? <CreateProject onDone={() => { setCreating(false); refresh(); }} /> : null}
+      <datalist id="github-repo-candidates">
+        {candidates.map((c) => (
+          <option key={c} value={c} />
+        ))}
+      </datalist>
       <div className="project-cards">
         {active.map((p) => (
-          <ProjectCard key={p.id} project={p} onChange={() => void refresh()} />
+          <ProjectCard key={p.id} project={p} githubApp={githubApp} onChange={refresh} />
         ))}
       </div>
       {archived.length ? (
@@ -46,7 +70,7 @@ export function ProjectsPage() {
           <div className="section-title">アーカイブ済み</div>
           <div className="project-cards">
             {archived.map((p) => (
-              <ProjectCard key={p.id} project={p} onChange={() => void refresh()} />
+              <ProjectCard key={p.id} project={p} githubApp={githubApp} onChange={refresh} />
             ))}
           </div>
         </>
@@ -108,7 +132,7 @@ function CreateProject({ onDone }: { onDone(): void }) {
   );
 }
 
-function ProjectCard({ project: p, onChange }: { project: ProjectDto; onChange(): void }) {
+function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto; githubApp: boolean; onChange(): void }) {
   const [repo, setRepo] = useState('');
   const [label, setLabel] = useState(p.repository?.policy.triggerLabel ?? 'ai:ready');
   const [maxRev, setMaxRev] = useState(p.repository?.policy.maxRevisionAttempts ?? 3);
@@ -171,9 +195,16 @@ function ProjectCard({ project: p, onChange }: { project: ProjectDto; onChange()
         </h4>
         {p.repository ? (
           <div className="pa-repo">
-            <span className="mono">{p.repository.fullName}</span>
+            {p.repository.verification === 'github_app' ? (
+              <a className="mono" href={`https://github.com/${p.repository.fullName}`} target="_blank" rel="noreferrer">
+                {p.repository.fullName}
+              </a>
+            ) : (
+              <span className="mono">{p.repository.fullName}</span>
+            )}
             <span className="faint small mono">
-              installation {p.repository.installationId} · repo {p.repository.repositoryId} · {p.repository.verification}
+              {p.repository.verification === 'github_app' ? 'GitHub App' : 'シミュレーター'} · installation {p.repository.installationId} · repo {p.repository.repositoryId}
+              {p.repository.defaultBranch ? ` · 既定ブランチ ${p.repository.defaultBranch}` : ''}
             </span>
             <button className="btn ghost small" onClick={() => void act(() => api.del(`/v1/projects/${p.id}/repositories`), '接続を解除しました')}>
               接続解除
@@ -181,7 +212,14 @@ function ProjectCard({ project: p, onChange }: { project: ProjectDto; onChange()
           </div>
         ) : (
           <div className="pa-repo">
-            <input className="mono" value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="owner/repo" aria-label="Repo" />
+            <input
+              className="mono"
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              placeholder={githubApp ? 'owner/repo（GitHub App をインストールしたリポジトリ）' : 'owner/repo'}
+              aria-label="Repo"
+              list={githubApp ? 'github-repo-candidates' : undefined}
+            />
             <button className="btn small" disabled={!repo.trim()} onClick={() => void act(() => api.post(`/v1/projects/${p.id}/repositories`, { fullName: repo.trim() }), 'Repo を接続しました（自動起動は OFF）')}>
               接続
             </button>
@@ -189,7 +227,32 @@ function ProjectCard({ project: p, onChange }: { project: ProjectDto; onChange()
         )}
       </div>
 
-      {p.repository ? (
+      {p.repository?.managedCheckout ? (
+        <div className="pa-section">
+          <h4>
+            <Icon name="sparkles" size={14} /> Claude の作業場所
+            <span className={`runtime-pill ${p.repository.runtime ?? 'simulated'}`}>{isClaudeRuntime(p.repository.runtime) ? `${runtimeLabel(p.repository.runtime)} で実行` : 'シミュレーション'}</span>
+          </h4>
+          <p className="small">
+            サーバーが GitHub から取得した作業コピーを使います（起点: <span className="mono">{p.repository.defaultBranch ?? '既定ブランチ'}</span>）。結果は <span className="mono">ai/run-…</span> ブランチとして GitHub に push し、Draft PR を作ります。
+          </p>
+          <div className="form-grid">
+            <label className="span-2">
+              テストコマンド（任意・&& で連結可、シェル記号は不可）
+              <input className="mono" value={testCommand} onChange={(e) => setTestCommand(e.target.value)} placeholder="pnpm install --frozen-lockfile && pnpm test" />
+            </label>
+          </div>
+          <div className="form-actions">
+            <button
+              className="btn small primary"
+              onClick={() => void act(() => api.put(`/v1/projects/${p.id}/local-repo`, { localPath: null, testCommand: testCommand.trim() || null }), 'テストコマンドを保存しました')}
+            >
+              保存
+            </button>
+          </div>
+          <p className="hint">テストコマンドはサーバー上で実行されます。必要なツール（Node.js・pnpm など）をサーバーに入れておいてください。マージは人が GitHub で行います（AI はマージしません）。</p>
+        </div>
+      ) : p.repository ? (
         <div className="pa-section">
           <h4>
             <Icon name="sparkles" size={14} /> Claude が作業するローカルリポジトリ

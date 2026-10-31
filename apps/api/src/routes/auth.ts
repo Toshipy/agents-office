@@ -12,10 +12,19 @@ import { DEMO_ACCOUNTS } from '../seed';
 import { parseBody } from './helpers';
 
 export function registerAuthRoutes(app: Hono<AppEnv>, s: Services) {
-  app.get('/v1/auth/config', (c) =>
+  /** PAW_SIGNUP: open = 誰でも / first_user = ユーザーがまだいない時だけ（サーバーの所有者用）/ closed = 不可 */
+  const signupAllowed = async () => {
+    if (s.config.signup === 'open') return true;
+    if (s.config.signup === 'closed') return false;
+    const [any] = await s.db.select({ id: users.id }).from(users).limit(1);
+    return !any;
+  };
+
+  app.get('/v1/auth/config', async (c) =>
     c.json({
-      mode: 'local',
+      mode: s.config.publicUrl ? 'server' : 'local',
       devRoutes: s.config.enableDevRoutes,
+      signup: await signupAllowed(),
       devAccounts: s.config.enableDevRoutes && s.config.seedDemo ? DEMO_ACCOUNTS.map(({ username, password, displayName }) => ({ username, password, displayName })) : [],
     }),
   );
@@ -42,6 +51,7 @@ export function registerAuthRoutes(app: Hono<AppEnv>, s: Services) {
 
   app.post('/v1/auth/signup', async (c) => {
     const body = await parseBody(c, SignupRequest);
+    if (!(await signupAllowed())) throw new AppError(403, 'SIGNUP_DISABLED', '新規登録は無効です（このサーバーは所有者専用です）');
     const { userId, workspace } = await createUserWithWorkspace(s.db, {
       username: body.username.toLowerCase(),
       displayName: body.displayName,

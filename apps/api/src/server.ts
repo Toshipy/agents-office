@@ -8,13 +8,17 @@ import { seedIfEmpty } from './seed';
 import { resolveAgentRuntime } from './agents/claude/detect';
 
 async function main() {
-  const isStart = process.env.npm_lifecycle_event === 'start';
+  // `pnpm start` またはサーバー運用（PAW_SERVE_WEB=1）では、ビルド済みの Web 画面も API から配信する
+  const isStart = process.env.npm_lifecycle_event === 'start' || process.env.PAW_SERVE_WEB === '1';
   const config = loadConfig({
     serveWebDist: isStart ? resolve(REPO_ROOT, 'apps/web/dist') : null,
   });
   setLogLevel(config.logLevel);
   await resolveAgentRuntime(config);
   log.info('agent runtime', { runtime: config.agentRuntime, reason: config.agentRuntimeReason });
+  if (config.githubApp) {
+    log.info('github app', { appId: config.githubApp.appId, allowedUsers: config.githubApp.allowedUsers });
+  }
   const services = await createServices(config);
   const app = createApp(services);
   if (config.seedDemo) await seedIfEmpty(services);

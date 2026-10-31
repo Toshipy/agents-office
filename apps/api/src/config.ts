@@ -41,6 +41,41 @@ export interface AppConfig {
   claudeStepTimeoutMs: number;
   worktreesDir: string;
   testTimeoutMs: number;
+  /** GitHub App 連携（未設定ならローカルの GitHub シミュレーターのみ） */
+  githubApp: { appId: string; privateKeyPem: string; apiUrl: string; allowedUsers: string[] } | null;
+  /** サーバーで公開する URL（例 https://paw.example.com）。Cookie の Secure・許可 Origin に使う */
+  publicUrl: string | null;
+  cookieSecure: boolean;
+  /** 新規登録: open = 誰でも / first_user = 最初の 1 人だけ / closed = 不可 */
+  signup: 'open' | 'first_user' | 'closed';
+}
+
+/**
+ * GitHub App の設定（PAW_GITHUB_APP_ID と秘密鍵の両方があれば有効）。
+ * 秘密鍵は PAW_GITHUB_APP_PRIVATE_KEY_FILE（推奨・パーミッション 600 のファイル）か PAW_GITHUB_APP_PRIVATE_KEY。
+ */
+function loadGithubApp(): AppConfig['githubApp'] {
+  const appId = process.env.PAW_GITHUB_APP_ID?.trim();
+  const keyFile = process.env.PAW_GITHUB_APP_PRIVATE_KEY_FILE?.trim();
+  const inlineKey = process.env.PAW_GITHUB_APP_PRIVATE_KEY;
+  if (!appId && !keyFile && !inlineKey) return null;
+  if (!appId) throw new Error('PAW_GITHUB_APP_ID が未設定です（GitHub App の秘密鍵だけが設定されています）');
+  const pem = keyFile ? readFileSync(keyFile, 'utf8') : (inlineKey ?? '').replace(/\\n/g, '\n');
+  if (!pem.includes('PRIVATE KEY')) throw new Error('GitHub App の秘密鍵（PEM）を読み込めません: PAW_GITHUB_APP_PRIVATE_KEY_FILE を確認してください');
+  // 実 GitHub の Webhook は、App に設定した secret と同じ値でしか検証できない（自動生成の値では受け付けられない）
+  if (!nonEmpty(process.env.PAW_GITHUB_WEBHOOK_SECRET) || process.env.PAW_GITHUB_WEBHOOK_SECRET!.trim().length < 16) {
+    throw new Error('GitHub App を使う場合は PAW_GITHUB_WEBHOOK_SECRET（16 文字以上。App の Webhook secret と同じ値）を設定してください');
+  }
+  const allowedUsers = (process.env.PAW_GITHUB_ALLOWED_USERS ?? '')
+    .split(',')
+    .map((u) => u.trim().toLowerCase())
+    .filter(Boolean);
+  return { appId, privateKeyPem: pem, apiUrl: process.env.PAW_GITHUB_API_URL?.trim() || 'https://api.github.com', allowedUsers };
+}
+
+function parseSignup(v: string | undefined): AppConfig['signup'] {
+  const m = (v ?? 'open').trim().toLowerCase().replace('-', '_');
+  return m === 'first_user' || m === 'closed' ? m : 'open';
 }
 
 export interface ClaudeCodeConfig {
@@ -101,6 +136,10 @@ function provisionalRuntime(mode: 'auto' | AgentRuntime): { runtime: AgentRuntim
     : { runtime: 'simulated', reason: 'Claude の実行手段が見つからないためシミュレーションで動作しています' };
 }
 
+function nonEmpty(v: string | undefined | null): string | undefined {
+  return v && v.trim().length > 0 ? v.trim() : undefined;
+}
+
 interface PersistedSecrets {
   sessionSecret: string;
   githubWebhookSecret: string;
@@ -113,22 +152,21 @@ function loadSecrets(dataDir: string): PersistedSecrets {
   if (existsSync(file)) {
     persisted = JSON.parse(readFileSync(file, 'utf8')) as Partial<PersistedSecrets>;
   }
+  // 空文字（`PAW_SESSION_SECRET=` のまま）は未設定として扱う。空の鍵で署名・検証させない
+  const envSession = nonEmpty(process.env.PAW_SESSION_SECRET);
+  const envWebhook = nonEmpty(process.env.PAW_GITHUB_WEBHOOK_SECRET);
   const secrets: PersistedSecrets = {
-    sessionSecret:
-      process.env.PAW_SESSION_SECRET ?? persisted.sessionSecret ?? randomBytes(32).toString('hex'),
-    githubWebhookSecret:
-      process.env.PAW_GITHUB_WEBHOOK_SECRET ??
-      persisted.githubWebhookSecret ??
-      randomBytes(24).toString('hex'),
+    sessionSecret: envSession ?? nonEmpty(persisted.sessionSecret) ?? randomBytes(32).toString('hex'),
+    githubWebhookSecret: envWebhook ?? nonEmpty(persisted.githubWebhookSecret) ?? randomBytes(24).toString('hex'),
   };
-  if (!process.env.PAW_SESSION_SECRET || !process.env.PAW_GITHUB_WEBHOOK_SECRET) {
+  if (!envSession || !envWebhook) {
     mkdirSync(dataDir, { recursive: true });
     writeFileSync(
       file,
       JSON.stringify(
         {
-          sessionSecret: persisted.sessionSecret ?? secrets.sessionSecret,
-          githubWebhookSecret: persisted.githubWebhookSecret ?? secrets.githubWebhookSecret,
+          sessionSecret: nonEmpty(persisted.sessionSecret) ?? secrets.sessionSecret,
+          githubWebhookSecret: nonEmpty(persisted.githubWebhookSecret) ?? secrets.githubWebhookSecret,
         },
         null,
         2,
@@ -147,6 +185,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     ? { sessionSecret: 'test-session-secret', githubWebhookSecret: 'test-webhook-secret' }
     : loadSecrets(root);
   const port = Number(process.env.PAW_API_PORT ?? 8787);
+  const publicUrl = process.env.PAW_PUBLIC_URL?.trim().replace(/\/$/, '') || null;
   const mode = parseRuntimeMode(process.env.PAW_AGENT_RUNTIME);
   const runtime = provisionalRuntime(mode);
   const effort = (process.env.PAW_CLAUDE_EFFORT ?? 'high') as AppConfig['claudeEffort'];
@@ -158,13 +197,16 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     port,
     sessionSecret: secrets.sessionSecret,
     githubWebhookSecret: secrets.githubWebhookSecret,
-    allowedOrigins: (
-      process.env.PAW_ALLOWED_ORIGINS ??
-      `http://localhost:5173,http://127.0.0.1:5173,http://localhost:${port},http://127.0.0.1:${port}`
-    )
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
+    allowedOrigins: [
+      ...(
+        process.env.PAW_ALLOWED_ORIGINS ??
+        `http://localhost:5173,http://127.0.0.1:5173,http://localhost:${port},http://127.0.0.1:${port}`
+      )
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+      ...(publicUrl ? [new URL(publicUrl).origin] : []),
+    ],
     simSpeed: Number(process.env.PAW_SIM_SPEED ?? 1),
     simRandomFailures: (process.env.PAW_SIM_RANDOM_FAILURES ?? '1') !== '0',
     tickMs: 400,
@@ -182,6 +224,10 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     claudeStepTimeoutMs: positiveInt(process.env.PAW_CLAUDE_STEP_TIMEOUT_MS, 30 * 60_000),
     worktreesDir: resolve(root, 'worktrees'),
     testTimeoutMs: Number(process.env.PAW_TEST_TIMEOUT_MS ?? 600_000),
+    githubApp: isMemory ? null : loadGithubApp(),
+    publicUrl,
+    cookieSecure: publicUrl?.startsWith('https://') ?? false,
+    signup: parseSignup(process.env.PAW_SIGNUP),
     ...overrides,
   };
 }

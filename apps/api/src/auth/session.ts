@@ -31,7 +31,8 @@ export async function issueSession(c: Context<AppEnv>, s: Services, userId: stri
     sameSite: 'Strict',
     path: '/',
     maxAge: SESSION_TTL_SEC,
-    secure: new URL(c.req.url).protocol === 'https:',
+    // HTTPS のリバースプロキシ（Caddy 等）の後ろでは API 自体は http で受けるため、公開 URL の設定でも判定する
+    secure: s.config.cookieSecure || new URL(c.req.url).protocol === 'https:',
   });
 }
 

@@ -604,6 +604,18 @@ export class WorkflowEngine {
       pr: run.pr ? { number: run.pr.number, url: run.pr.url, branch: run.pr.branch, headSha: run.pr.headSha } : null,
       runtime: run.runtime,
       localRepo: binding?.localPath ? { path: binding.localPath, testCommand: binding.testCommand } : null,
+      remote:
+        binding && binding.verification === 'github_app' && binding.cloneUrl && binding.defaultBranch
+          ? {
+              provider: 'github',
+              installationId: binding.installationId,
+              repositoryId: binding.repositoryId,
+              fullName: binding.fullName,
+              defaultBranch: binding.defaultBranch,
+              cloneUrl: binding.cloneUrl,
+            }
+          : null,
+      issueNumber: run.source.type === 'github_issue' ? (run.source.issueNumber ?? null) : null,
       signal,
       log: async (message, kind = 'log') => {
         assertActive();
@@ -948,6 +960,24 @@ export class WorkflowEngine {
       });
       if (r) await this.addStep(r, 'implement', 'developer', r.revisionCount);
       return 'revision_started';
+    });
+  }
+
+  /** GitHub で PR が人の手でマージされた: レビュー待ちなら承認済み → 完了にする */
+  async completeMergedRun(runId: string): Promise<RunRow | null> {
+    return this.withRunLock(runId, async () => {
+      const [run] = await this.db.select().from(runs).where(eq(runs.id, runId));
+      if (!run || run.status !== 'waiting_review') return null;
+      const decided = await this.db
+        .update(approvals)
+        .set({ status: 'approved', version: sql`${approvals.version} + 1`, decidedBy: 'github:merged', decidedAt: new Date(), decisionComment: 'PR がマージされました' })
+        .where(and(eq(approvals.runId, runId), eq(approvals.status, 'pending'), eq(approvals.actionType, 'pr_review')))
+        .returning();
+      for (const a of decided) {
+        await this.bus.emit(run.workspaceId, 'approval.resolved', { approvalId: a.id, status: a.status, decidedBy: a.decidedBy }, { runId, projectId: run.projectId });
+      }
+      const r = await this.transition(runId, 'approved');
+      return r ? this.transition(runId, 'completed') : null;
     });
   }
 

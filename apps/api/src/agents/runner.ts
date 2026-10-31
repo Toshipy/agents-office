@@ -9,6 +9,7 @@
  */
 import type { AgentRuntime, StepKey, StepRole, UsageMeasurement } from '@paw/contracts';
 import type { ArtifactKind, ArtifactRow } from '../workflow/artifactStore';
+import type { RemoteRepo } from '../github/repoHost';
 
 export interface StepExecutionContext {
   runId: string;
@@ -31,8 +32,12 @@ export interface StepExecutionContext {
   pr: { number: number; url: string; branch: string; headSha: string } | null;
   /** この Run の実行基盤（Run 作成時に確定） */
   runtime: AgentRuntime;
-  /** Project に設定されたローカル git リポジトリ（Claude 実行時に使用） */
+  /** Project に設定されたローカル git リポジトリ（Claude 実行時に使用。GitHub 連携時はサーバー上の管理クローン） */
   localRepo: { path: string; testCommand: string | null } | null;
+  /** GitHub App で接続したリポジトリ（push と Draft PR 作成に使う）。ローカル / シミュレーターの Repo は null */
+  remote: RemoteRepo | null;
+  /** GitHub Issue から起動した Run の Issue 番号 */
+  issueNumber: number | null;
   signal: AbortSignal;
   log(message: string, kind?: 'log' | 'error'): Promise<void>;
   /** Tool Broker を通したツール呼び出し。拒否されても例外は投げず結果を返す */

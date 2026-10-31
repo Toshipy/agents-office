@@ -6,7 +6,9 @@
 > **AI は Claude で動きます。** この PC の Claude Code に **claude.ai のサブスク（Pro / Max など）でログイン済み**なら、
 > API キーなし・追加課金なしで、その利用枠を使って動きます。`ANTHROPIC_API_KEY`（Claude API・従量課金）でも動かせます。
 > Project にローカルの git リポジトリを指定すると、Claude が Run ごとの専用ブランチで計画 → 実装 → テスト → レビュー → Draft PR を進めます（「Claude で実行する」）。
-> どちらも無い場合や、ローカルリポジトリを指定していない Project はシミュレーションで動きます。GitHub への push は未接続です。
+> どちらも無い場合や、ローカルリポジトリを指定していない Project はシミュレーションで動きます。
+>
+> **PC を閉じていても動かしたい場合**は、AWS の EC2 1 台で常時起動し、GitHub App で実際のリポジトリとつなげます（Issue にラベル → AI が作業 → Draft PR）。手順は [deploy/aws/README.md](deploy/aws/README.md) にあります。
 
 Agents Office のソースコード・3D モデル・固有デザイン・名称は使っていません（要求定義書 1.3 / ADR-015）。
 3D のキャラクター・机・島・ハブ・アイコンはすべてこのリポジトリ内のコードで作った独自のものです。
@@ -186,6 +188,26 @@ PAW_AGENT_RUNTIME=claude pnpm dev
 | `PAW_CLAUDE_STEP_TIMEOUT_MS` | `1800000` | Claude で実行する工程 1 つのタイムアウト（30 分） |
 | `PAW_TEST_TIMEOUT_MS` | `600000` | テストコマンドのタイムアウト |
 
+### GitHub App で実際のリポジトリとつなぐ（サーバー運用）
+
+`PAW_GITHUB_APP_ID` と秘密鍵を設定すると、GitHub シミュレーターの代わりに実際の GitHub とつながります。設定の詳細は [deploy/aws/README.md](deploy/aws/README.md) を参照してください。
+
+- **Repo の接続:** GitHub API でインストール済みであることを確認し、実際の Repository ID・既定ブランチを使います。
+- **作業コピー:** サーバー上の管理クローン（`.data/repos/<id>`）から Run ごとに作ります。起点は `origin/<既定ブランチ>` です。
+- **成果物:** `ai/run-…` ブランチを GitHub に push し、Draft PR を作ります。Request changes のときは同じ PR に追加の push をします。
+- **PR の扱い:** Approve かマージで Run は完了、マージせずに閉じると中止になります。
+- **受け付ける操作:** Issue からの起動とレビューは、`PAW_GITHUB_ALLOWED_USERS` に入れた GitHub ユーザーの操作だけです。
+- **トークン:** GitHub のトークンは Installation token（短期）をメモリにだけ保持し、git には askpass で渡します。Claude Code には渡しません。
+
+| 変数 | 内容 |
+|---|---|
+| `PAW_GITHUB_APP_ID` / `PAW_GITHUB_APP_PRIVATE_KEY_FILE` | GitHub App の ID と秘密鍵（.pem）のパス |
+| `PAW_GITHUB_WEBHOOK_SECRET` | App の Webhook secret と同じ値（16 文字以上。GitHub App 使用時は必須） |
+| `PAW_GITHUB_ALLOWED_USERS` | Issue・レビューを受け付ける GitHub ユーザー（カンマ区切り） |
+| `PAW_PUBLIC_URL` | 公開 URL（HTTPS なら Cookie に Secure を付け、Origin を許可） |
+| `PAW_SIGNUP` | `open`（既定）/ `first_user`（最初の 1 人だけ）/ `closed` |
+| `PAW_SERVE_WEB` | `1` で API からビルド済みの画面も配信 |
+
 ### ブラウザだけで動くデモ
 
 API を起動せずに見た目と動きを確認できるデモ版もあります（AI 実行・GitHub・データはすべてブラウザ内のシミュレーション）。
@@ -288,6 +310,9 @@ docs/           要求定義書・要件定義書・基本設計書
 `apps/api/src/claude-code.test.ts`（Claude Code・サブスク実行基盤）: 公式ドキュメントの `stream-json` 形式を再現した偽の `claude` CLI を使い、一時ディレクトリの実 git リポジトリで検証します。
 起動オプション（`--restricted`・ツール制限・hooks 無効・拒否ルール・JSON スキーマ）、API キー等を子プロセスに渡さないこと、`ai/` ブランチへのコミット、CI 設定・`.claude/` への変更の破棄、利用上限での一時停止と「続行」で同じ工程から再開すること、未ログイン・CLI 不在・API キー課金の検出、異常終了の上限付き再試行、中止時に CLI プロセスを止めること、起動時の自動判定（サブスク優先）を確認しています。**本物の Claude Code・サブスクでの動作は未確認です。**
 
+`apps/api/src/github-app.test.ts`（GitHub App 連携）: GitHub REST API のモック（App の JWT を公開鍵で検証）と git の bare リポジトリを使い、実際の GitHub と同じ形式の署名付き Webhook から検証します。
+インストール済みリポジトリだけ接続できること、許可していないユーザーの Issue・レビューを無視すること、`ai/` ブランチの push と Draft PR の作成、Request changes で同じ PR を更新すること、マージで完了・マージせずに閉じると中止、トークンを git の設定や Claude Code に渡さないこと、偽造 Webhook の拒否を確認しています。**本物の GitHub・AWS での動作は未確認です。**
+
 `apps/api/src/claude.test.ts`（Claude API 実行基盤）: Claude API の代わりに台本どおり応答する偽クライアントを注入し、一時ディレクトリの実 git リポジトリで検証します。
 ローカルリポジトリの検証、worktree 外・秘密ファイル・CI 設定へのアクセス拒否、`ai/` ブランチへのコミット、構造化出力・フォールバック設定、実測トークンによる費用、refusal と SDK エラーを再試行しないこと、要件確認からの再計画、変更の無い Run のブランチ片付けを確認しています。**実際の Claude API への接続は、この開発環境に API キーが無いため未確認です。**
 
@@ -311,7 +336,7 @@ docs/           要求定義書・要件定義書・基本設計書
 
 ## 未実装（P1 / P2 またはクラウド前提のもの）
 
-- GitHub App への実接続（Draft PR はローカルブランチとして作成。GitHub への push・PR 作成は未接続）
+- GitHub 側への作業状況コメント / Check 表示（FR-027・P1）
 - Runner のコンテナ隔離（テストコマンドはローカルで直接実行）
 - 運用者向けの障害・遅延通知（FR-057）、ログ保持期間の設定（UI-07 の一部）、データのエクスポート・削除（FR-058）
 - P1: 文書・連絡 Agent、Slack / Gmail / Drive 連携、定期タスク。P2: チーム共有、ナレッジグラフ

@@ -22,6 +22,8 @@ import { ClaudeRunner } from './agents/claude/runner';
 import { ClaudeApiBackend, type ClaudeMessagesClient } from './agents/claude/apiBackend';
 import { ClaudeCodeBackend } from './agents/claude/cliBackend';
 import { removeWorktree } from './agents/claude/git';
+import { GithubApp } from './github/app';
+import { GithubRepoHost } from './github/repoHost';
 import { Dispatcher } from './github/dispatcher';
 import { MAX_WEBHOOK_BYTES, receiveGithubWebhook } from './github/webhook';
 import { SeatWatcher } from './services/office';
@@ -43,6 +45,8 @@ export interface Services {
   engine: WorkflowEngine;
   dispatcher: Dispatcher;
   seats: SeatWatcher;
+  /** GitHub App 連携（未設定なら null = シミュレーターのみ） */
+  github: GithubApp | null;
 }
 
 export type AppEnv = {
@@ -54,10 +58,15 @@ export type AppEnv = {
 
 export async function createServices(
   config: AppConfig,
-  opts: { runner?: AgentRunner; claudeClient?: ClaudeMessagesClient } = {},
+  opts: { runner?: AgentRunner; claudeClient?: ClaudeMessagesClient; githubFetch?: typeof fetch } = {},
 ): Promise<Services> {
   setLogLevel(config.logLevel);
-  const common = { worktreesDir: config.worktreesDir, testTimeoutMs: config.testTimeoutMs };
+  const github = config.githubApp ? new GithubApp(config.githubApp, opts.githubFetch) : null;
+  if (github && github.cfg.allowedUsers.length === 0) {
+    log.warn('PAW_GITHUB_ALLOWED_USERS が未設定のため、GitHub の Issue・レビューからは Run を起動しません');
+  }
+  const remoteHost = github ? new GithubRepoHost(github, config.dataRoot) : null;
+  const common = { worktreesDir: config.worktreesDir, testTimeoutMs: config.testTimeoutMs, remoteHost };
   const runner =
     opts.runner ??
     new RunnerRouter(
@@ -88,9 +97,9 @@ export async function createServices(
   const bus = new EventBus(db);
   const store = new ArtifactStore(db, config.dataDir === 'memory' ? 'memory' : config.artifactsDir);
   const engine = new WorkflowEngine(db, bus, store, runner, config);
-  const dispatcher = new Dispatcher(db, bus, engine);
+  const dispatcher = new Dispatcher(db, bus, engine, github);
   const seats = new SeatWatcher(db, bus);
-  return { db, client, config, bus, store, engine, dispatcher, seats };
+  return { db, client, config, bus, store, engine, dispatcher, seats, github };
 }
 
 export function createApp(s: Services) {

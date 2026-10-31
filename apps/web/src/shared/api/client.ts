@@ -97,6 +97,9 @@ export interface ProjectDto {
     policy: AutomationPolicy & { triggerLabel: string };
     localPath?: string | null;
     testCommand?: string | null;
+    /** GitHub App 連携: サーバーが GitHub から取得した作業コピーを使う */
+    managedCheckout?: boolean;
+    defaultBranch?: string | null;
     runtime?: AgentRuntime;
   } | null;
 }
@@ -217,3 +220,15 @@ export interface RuntimeInfo {
 }
 
 export type { OfficeState, StepLogLine, WorkspaceEvent, ApprovalDecision };
+
+export interface GithubInstallationsDto {
+  mode: 'github_app' | 'simulated';
+  note: string;
+  allowedUsers?: string[];
+  error?: string | null;
+  installations: {
+    installationId: number;
+    account: string;
+    repositories: { fullName: string; repositoryId: number; private?: boolean; projectId: string | null }[];
+  }[];
+}

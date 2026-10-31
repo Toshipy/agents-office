@@ -52,16 +52,18 @@ export function LoginPage() {
           </svg>
           <div>
             <h1>Personal AI Workspace</h1>
-            <p>あなた専用の AI エージェント・オフィス（ローカル版）</p>
+            <p>あなた専用の AI エージェント・オフィス（{cfg.data?.mode === 'server' ? 'サーバー版' : 'ローカル版'}）</p>
           </div>
         </div>
         <div className="seg" role="tablist">
           <button type="button" role="tab" aria-selected={mode === 'login'} className={mode === 'login' ? 'on' : ''} onClick={() => setMode('login')}>
             サインイン
           </button>
-          <button type="button" role="tab" aria-selected={mode === 'signup'} className={mode === 'signup' ? 'on' : ''} onClick={() => setMode('signup')}>
-            新規登録
-          </button>
+          {cfg.data?.signup !== false ? (
+            <button type="button" role="tab" aria-selected={mode === 'signup'} className={mode === 'signup' ? 'on' : ''} onClick={() => setMode('signup')}>
+              新規登録
+            </button>
+          ) : null}
         </div>
         <label>
           ユーザー名

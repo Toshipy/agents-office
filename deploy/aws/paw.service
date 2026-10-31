@@ -1,0 +1,29 @@
+# Personal AI Workspace（API + Web 画面）を常時起動する systemd ユニット
+# 配置先: /etc/systemd/system/paw.service
+[Unit]
+Description=Personal AI Workspace
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=paw
+Group=paw
+WorkingDirectory=/home/paw/agents-office
+# 秘密値（サブスクのトークン・GitHub App の設定など）はこのファイルに置く（root:paw 0640）
+EnvironmentFile=/etc/paw/paw.env
+# claude（~/.local/bin）と pnpm を見つけられるようにする
+Environment=PATH=/home/paw/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PAW_SERVE_WEB=1
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/env pnpm --filter @paw/api start
+Restart=on-failure
+RestartSec=5
+# 停止時は実行中の工程を中断し、次回起動時に復旧する（engine.recover）
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

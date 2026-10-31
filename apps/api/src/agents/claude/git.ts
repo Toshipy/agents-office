@@ -76,15 +76,30 @@ export interface Worktree {
   baseSha: string;
 }
 
-/** Run 用の worktree を作る（既にあれば再利用）。ブランチは ai/ で始まる専用ブランチ */
-export async function ensureWorktree(repoPath: string, worktreesDir: string, runId: string, branch: string, signal?: AbortSignal): Promise<Worktree> {
+export function worktreeExists(worktreesDir: string, runId: string) {
+  const path = resolve(worktreesDir, runId);
+  return existsSync(path) && existsSync(`${path}.base`);
+}
+
+/**
+ * Run 用の worktree を作る（既にあれば再利用）。ブランチは ai/ で始まる専用ブランチ。
+ * baseRef は起点（ローカルリポジトリは HEAD、GitHub 連携の管理クローンは origin/<既定ブランチ>）。
+ */
+export async function ensureWorktree(
+  repoPath: string,
+  worktreesDir: string,
+  runId: string,
+  branch: string,
+  signal?: AbortSignal,
+  baseRef = 'HEAD',
+): Promise<Worktree> {
   const path = resolve(worktreesDir, runId);
   const baseFile = `${path}.base`;
   if (existsSync(path) && existsSync(baseFile)) {
     return { path, branch, baseSha: (await readFile(baseFile, 'utf8')).trim() };
   }
   await mkdir(worktreesDir, { recursive: true });
-  const baseSha = (await git(repoPath, ['rev-parse', 'HEAD'], signal)).trim();
+  const baseSha = (await git(repoPath, ['rev-parse', '--verify', `${baseRef}^{commit}`], signal)).trim();
   const exists = await run('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoPath });
   if (exists.code === 0) await git(repoPath, ['worktree', 'add', path, branch], signal);
   else await git(repoPath, ['worktree', 'add', '-b', branch, path, baseSha], signal);

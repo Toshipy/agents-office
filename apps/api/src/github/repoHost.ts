@@ -1,0 +1,153 @@
+/**
+ * GitHub 上のリポジトリを、サーバー上の管理クローン（.data/repos/<repositoryId>）経由で扱う。
+ *  - prepare: クローン（初回）/ fetch して、Run の作業ブランチの起点（origin/<既定ブランチ>）を返す
+ *  - publish: ai/ ブランチを push し、Draft PR を作成（更新時は push のみ。PR は GitHub 側で自動更新される）
+ *
+ * Installation token は GIT_ASKPASS 経由で git に渡す（コマンド引数・remote URL・git の設定に残さない）。
+ * credential.helper は空にして、OS の資格情報ストアにも保存させない。
+ * これらの操作は API プロセスが Tool Broker の判定後に行い、Claude Code（Runner）にはトークンを渡さない。
+ */
+import { existsSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import type { StepExecutionContext } from '../agents/runner';
+import { RunnerError } from '../agents/runner';
+import { headSha, run, safeEnv } from '../agents/claude/git';
+import { Mutex } from '../lib/mutex';
+import { GithubApiError, type GithubApp } from './app';
+
+export interface RemoteRepo {
+  provider: 'github';
+  installationId: number;
+  repositoryId: number;
+  fullName: string;
+  defaultBranch: string;
+  cloneUrl: string;
+}
+
+export interface RemoteRepoHost {
+  prepare(ctx: StepExecutionContext, localPath: string, remote: RemoteRepo): Promise<{ baseRef: string }>;
+  publish(
+    ctx: StepExecutionContext,
+    worktree: string,
+    remote: RemoteRepo,
+    args: { branch: string; existing: { number: number; url: string } | null; title: string; body: string },
+  ): Promise<{ number: number; url: string; headSha: string }>;
+}
+
+const ASKPASS = `#!/bin/sh
+# GitHub の Installation token を git に渡すための askpass（トークンは環境変数でだけ受け取る）
+case "$1" in
+  Username*|username*) printf '%s\\n' "x-access-token" ;;
+  *) printf '%s\\n' "$PAW_GIT_ASKPASS_TOKEN" ;;
+esac
+`;
+
+/** GitHub API の失敗を、コードと再試行可否つきの RunnerError に変換する */
+export function githubRunnerError(err: unknown, what: string): RunnerError {
+  if (err instanceof RunnerError) return err;
+  if (err instanceof GithubApiError) {
+    if (err.status === 401 || err.status === 403 || err.status === 404) {
+      return new RunnerError(`${what}: GitHub App の権限・インストールを確認してください（${err.status} ${err.detail.slice(0, 200)}）`, 'GITHUB_AUTH_ERROR', false);
+    }
+    if (err.status === 422) return new RunnerError(`${what}: GitHub が受け付けませんでした（${err.detail.slice(0, 300)}）`, 'GITHUB_REJECTED', false);
+    return new RunnerError(`${what}: GitHub API エラー（${err.status}）`, 'GITHUB_API_ERROR', true);
+  }
+  return new RunnerError(`${what}: ${String((err as Error)?.message ?? err).slice(0, 300)}`, 'GITHUB_API_ERROR', true);
+}
+
+export class GithubRepoHost implements RemoteRepoHost {
+  private readonly locks = new Map<number, Mutex>();
+
+  constructor(
+    private readonly app: GithubApp,
+    private readonly dataRoot: string,
+  ) {}
+
+  private lock(repositoryId: number) {
+    let m = this.locks.get(repositoryId);
+    if (!m) {
+      m = new Mutex();
+      this.locks.set(repositoryId, m);
+    }
+    return m;
+  }
+
+  private async gitEnv(installationId: number) {
+    const askpass = resolve(this.dataRoot, 'git-askpass.sh');
+    if (!existsSync(askpass)) {
+      await mkdir(this.dataRoot, { recursive: true });
+      await writeFile(askpass, ASKPASS, { mode: 0o700 });
+    }
+    let token: string;
+    try {
+      token = await this.app.installationToken(installationId);
+    } catch (err) {
+      throw githubRunnerError(err, 'Installation token を取得できません');
+    }
+    return safeEnv({ GIT_ASKPASS: askpass, PAW_GIT_ASKPASS_TOKEN: token });
+  }
+
+  async prepare(ctx: StepExecutionContext, localPath: string, remote: RemoteRepo): Promise<{ baseRef: string }> {
+    return this.lock(remote.repositoryId).run(async () => {
+      const env = await this.gitEnv(remote.installationId);
+      if (!existsSync(join(localPath, '.git'))) {
+        await ctx.log(`GitHub から ${remote.fullName} を取得します（初回のみ）`);
+        await mkdir(dirname(localPath), { recursive: true });
+        const r = await run('git', ['-c', 'credential.helper=', 'clone', '--no-tags', '--quiet', remote.cloneUrl, localPath], {
+          cwd: dirname(localPath),
+          env,
+          timeoutMs: 15 * 60_000,
+          signal: ctx.signal,
+        });
+        if (r.code !== 0) throw new RunnerError(`リポジトリを取得できません: ${r.stderr.trim().slice(-300)}`, 'GIT_CLONE_FAILED', true);
+      } else {
+        // remote URL は常に資格情報を含まないクローン URL にしておく
+        await run('git', ['remote', 'set-url', 'origin', remote.cloneUrl], { cwd: localPath, env: safeEnv() });
+        const r = await run('git', ['-c', 'credential.helper=', 'fetch', '--prune', '--no-tags', '--quiet', 'origin'], {
+          cwd: localPath,
+          env,
+          timeoutMs: 10 * 60_000,
+          signal: ctx.signal,
+        });
+        if (r.code !== 0) throw new RunnerError(`リポジトリを更新できません: ${r.stderr.trim().slice(-300)}`, 'GIT_FETCH_FAILED', true);
+      }
+      await ctx.log(`起点: origin/${remote.defaultBranch}`);
+      return { baseRef: `refs/remotes/origin/${remote.defaultBranch}` };
+    });
+  }
+
+  async publish(
+    ctx: StepExecutionContext,
+    worktree: string,
+    remote: RemoteRepo,
+    args: { branch: string; existing: { number: number; url: string } | null; title: string; body: string },
+  ) {
+    if (!/^ai\/[A-Za-z0-9._/-]+$/.test(args.branch)) throw new RunnerError('ai/ 以外のブランチには push しません', 'POLICY_DENIED', false);
+    const env = await this.gitEnv(remote.installationId);
+    // 強制 push はしない（人が同じブランチに追加したコミットを消さない）
+    // フックは実行しない（リポジトリ由来の設定でトークンを持つプロセスにコードを実行させない）
+    const r = await run('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', 'push', '--quiet', '--no-verify', 'origin', `HEAD:refs/heads/${args.branch}`], {
+      cwd: worktree,
+      env,
+      timeoutMs: 10 * 60_000,
+      signal: ctx.signal,
+    });
+    if (r.code !== 0) throw new RunnerError(`ブランチ ${args.branch} を push できません: ${r.stderr.trim().slice(-300)}`, 'GIT_PUSH_FAILED', false);
+    const sha = await headSha(worktree);
+    await ctx.log(`GitHub に push: ${args.branch}（${sha.slice(0, 7)}）`);
+    if (args.existing) return { number: args.existing.number, url: args.existing.url, headSha: sha };
+    try {
+      const pr = await this.app.createDraftPullRequest(remote.installationId, remote.fullName, {
+        title: args.title.slice(0, 250),
+        head: args.branch,
+        base: remote.defaultBranch,
+        body: args.body.slice(0, 60_000),
+      });
+      await ctx.log(`Draft PR #${pr.number} を作成: ${pr.htmlUrl}`);
+      return { number: pr.number, url: pr.htmlUrl, headSha: sha };
+    } catch (err) {
+      throw githubRunnerError(err, 'Draft PR を作成できません');
+    }
+  }
+}

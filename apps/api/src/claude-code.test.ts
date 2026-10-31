@@ -15,6 +15,7 @@ import { runSteps, runs, usageRecords } from './db/schema';
 import { ClaudeCodeBackend } from './agents/claude/cliBackend';
 import { probeClaudeCode, resolveAgentRuntime } from './agents/claude/detect';
 import { RunnerError, type StepExecutionContext } from './agents/runner';
+import { FAKE_CLAUDE_CLI } from './testing/fakeClaude';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-cc-'));
 const repo = join(tmp, 'repo');
@@ -32,58 +33,7 @@ function git(cwd: string, ...args: string[]) {
   return execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], { cwd, encoding: 'utf8' });
 }
 
-/** 偽の claude CLI（公式ドキュメントの stream-json 形式を再現） */
-const STUB = String.raw`#!/usr/bin/env node
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-const here = dirname(fileURLToPath(import.meta.url));
-const args = process.argv.slice(2);
-const scenario = JSON.parse(readFileSync(join(here, 'scenario.json'), 'utf8'));
-if (args[0] === '--version') { console.log(scenario.version ?? '2.1.316 (Claude Code)'); process.exit(0); }
-if (args[0] === 'auth' && args[1] === 'status') {
-  const a = scenario.auth ?? { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' };
-  console.log(JSON.stringify(a, null, 2));
-  process.exit(a.loggedIn ? 0 : 1);
-}
-let stdin = '';
-for await (const c of process.stdin) stdin += c;
-const opt = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null; };
-const schema = opt('--json-schema');
-const purpose = schema ? (schema.includes('verdict') ? 'review' : 'plan') : 'develop';
-const countsFile = join(here, 'counts.json');
-const counts = existsSync(countsFile) ? JSON.parse(readFileSync(countsFile, 'utf8')) : {};
-counts[purpose] = (counts[purpose] ?? 0) + 1;
-writeFileSync(countsFile, JSON.stringify(counts));
-appendFileSync(join(here, 'calls.jsonl'), JSON.stringify({ purpose, args, cwd: process.cwd(), stdin, envKeys: Object.keys(process.env), pid: process.pid }) + '\n');
-const list = scenario[purpose] ?? [];
-const b = list[counts[purpose] - 1] ?? list[list.length - 1] ?? { kind: 'ok' };
-const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
-out({ type: 'system', subtype: 'init', model: 'claude-test-model', apiKeySource: b.apiKeySource ?? 'none', claude_code_version: '2.1.316', tools: (opt('--tools') ?? '').split(','), cwd: process.cwd(), permissionMode: opt('--permission-mode') });
-const modelUsage = { 'claude-test-model': { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 10, cacheCreationInputTokens: 5, costUSD: 0.0123 } };
-const result = (extra) => out({ type: 'result', subtype: 'success', is_error: false, result: 'done', duration_ms: 7, num_turns: 2, total_cost_usd: 0.0123, usage: {}, modelUsage, permission_denials: [], ...extra });
-if (b.kind === 'hang') { await new Promise((r) => setTimeout(r, 60000)); }
-if (b.kind === 'usage_limit') {
-  out({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: Math.floor(Date.now() / 1000) + 3600 } });
-  out({ type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text: 'Claude AI usage limit reached' }] } });
-  result({ is_error: true, result: 'Claude AI usage limit reached' });
-} else if (b.kind === 'auth') {
-  out({ type: 'assistant', error: 'authentication_failed', message: { content: [{ type: 'text', text: 'Invalid API key · Please run /login' }] } });
-  result({ is_error: true, result: 'Invalid API key · Please run /login' });
-} else if (b.kind === 'crash') {
-  process.stderr.write('segfault-ish');
-  process.exit(3);
-} else {
-  for (const w of b.writes ?? []) {
-    const p = join(process.cwd(), w.path);
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, w.content);
-    out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: p } }] } });
-  }
-  out({ type: 'assistant', message: { content: [{ type: 'text', text: b.text ?? '完了しました' }] } });
-  result({ structured_output: b.output, result: b.text ?? '完了しました' });
-}
-`;
+const STUB = FAKE_CLAUDE_CLI;
 
 const PLAN = {
   summary: 'greet の文言を変更する',

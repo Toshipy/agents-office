@@ -18,7 +18,8 @@ import { existsSync } from 'node:fs';
 import { PATTERNS, detectDangerous } from '@paw/sim-content';
 import type { AgentRunner, StepExecutionContext, StepOutput } from '../runner';
 import { RunnerError } from '../runner';
-import { changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, run, safeEnv } from './git';
+import { changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, run, safeEnv, worktreeExists } from './git';
+import type { RemoteRepoHost } from '../../github/repoHost';
 import type { ModelBackend } from './shared';
 import { DEVELOPER_SYSTEM, PLANNER_SYSTEM, PlanOutput, REVIEWER_SYSTEM, ReviewOutput, bullet } from './shared';
 
@@ -28,6 +29,8 @@ export interface ClaudeRunnerOptions {
   worktreesDir: string;
   testTimeoutMs: number;
   backend: ModelBackend;
+  /** GitHub App 連携（管理クローンの取得・push・Draft PR）。未設定ならローカルリポジトリのみ */
+  remoteHost?: RemoteRepoHost | null;
 }
 
 export class ClaudeRunner implements AgentRunner {
@@ -51,7 +54,13 @@ export class ClaudeRunner implements AgentRunner {
 
   private async executeInner(ctx: StepExecutionContext): Promise<StepOutput> {
     if (!ctx.localRepo) throw new RunnerError('Claude 実行にはローカルリポジトリの設定が必要です', 'LOCAL_REPO_MISSING', false);
-    const wt = await ensureWorktree(ctx.localRepo.path, this.opts.worktreesDir, ctx.runId, ctx.branch, ctx.signal);
+    let baseRef: string | undefined;
+    if (ctx.remote) {
+      if (!this.opts.remoteHost) throw new RunnerError('GitHub App が設定されていないため、このリポジトリでは実行できません', 'GITHUB_APP_UNAVAILABLE', false);
+      // 作業コピーを作る前に、GitHub の最新を取得して起点を決める（以降の工程は同じ作業コピーを使う）
+      if (!worktreeExists(this.opts.worktreesDir, ctx.runId)) baseRef = (await this.opts.remoteHost.prepare(ctx, ctx.localRepo.path, ctx.remote)).baseRef;
+    }
+    const wt = await ensureWorktree(ctx.localRepo.path, this.opts.worktreesDir, ctx.runId, ctx.branch, ctx.signal, baseRef);
     switch (ctx.key) {
       case 'plan':
         return this.plan(ctx, wt.path);
@@ -334,24 +343,57 @@ export class ClaudeRunner implements AgentRunner {
 
   private async pullRequest(ctx: StepExecutionContext, worktree: string, baseSha: string): Promise<StepOutput> {
     const update = ctx.key === 'update_pr' && ctx.pr !== null;
-    const push = await ctx.tool('github.branch.push', { repo: ctx.repo, branch: ctx.branch }, `ブランチを確定: ${ctx.branch}（ローカル）`);
+    const remote = ctx.remote;
+    const push = await ctx.tool('github.branch.push', { repo: ctx.repo, branch: ctx.branch }, `ブランチを確定: ${ctx.branch}${remote ? '（GitHub に push）' : '（ローカル）'}`);
     if (!push.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${push.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
     const tool = update ? 'github.pull_request.update' : 'github.pull_request.create_draft';
-    const res = await ctx.tool(tool, { repo: ctx.repo, branch: ctx.branch, base: 'main', draft: true }, update ? `Draft PR #${ctx.pr!.number} を更新` : 'Draft PR を作成（ローカル）');
+    const res = await ctx.tool(
+      tool,
+      { repo: ctx.repo, branch: ctx.branch, base: remote?.defaultBranch ?? 'main', draft: true },
+      update ? `Draft PR #${ctx.pr!.number} を更新` : `Draft PR を作成${remote ? '（GitHub）' : '（ローカル）'}`,
+    );
     if (!res.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${res.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
-    const number = update ? ctx.pr!.number : await ctx.allocatePrNumber();
-    const sha = await headSha(worktree);
     const diff = await diffFromBase(worktree, baseSha);
-    const pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: sha, draft: true };
     const testsSkipped = Boolean(ctx.previous.testsSkipped);
+    const testsLine = testsSkipped ? '未実行（コマンド未設定）' : ctx.previous.testsPassed === false ? '✗ 失敗' : '✓ 通過';
+    let pr: { number: number; url: string; branch: string; headSha: string; draft: true };
+    if (remote) {
+      const body = [
+        '## 内容',
+        '',
+        String(ctx.previous.developerSummary ?? ctx.title),
+        '',
+        '## AI レビュー',
+        '',
+        String(ctx.previous.reviewSummary ?? ''),
+        '',
+        `- テスト: ${testsLine}`,
+        `- 変更: ${diff.files.length} ファイル`,
+        ...(ctx.issueNumber ? [`- 関連 Issue: #${ctx.issueNumber}`] : []),
+        '',
+        '---',
+        `Personal AI Workspace の Run \`${ctx.runId}\` が作成した Draft PR です。マージするかどうかは人が判断してください（AI はマージしません）。`,
+        '',
+      ].join('\n');
+      const published = await this.opts.remoteHost!.publish(ctx, worktree, remote, {
+        branch: ctx.branch,
+        existing: update ? { number: ctx.pr!.number, url: ctx.pr!.url } : null,
+        title: ctx.title,
+        body,
+      });
+      pr = { number: published.number, url: published.url, branch: ctx.branch, headSha: published.headSha, draft: true };
+    } else {
+      const number = update ? ctx.pr!.number : await ctx.allocatePrNumber();
+      pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: await headSha(worktree), draft: true };
+    }
     const md = [
-      `# ${update ? 'Draft PR 更新' : 'Draft PR 作成'} — #${number}`,
+      `# ${update ? 'Draft PR 更新' : 'Draft PR 作成'} — #${pr.number}`,
       '',
-      `- リポジトリ: \`${ctx.localRepo!.path}\``,
-      `- ブランチ: \`${ctx.branch}\`（base: \`${baseSha.slice(0, 7)}\`）`,
-      `- head: \`${sha.slice(0, 12)}\``,
+      remote ? `- GitHub: ${pr.url}` : `- リポジトリ: \`${ctx.localRepo!.path}\``,
+      `- ブランチ: \`${ctx.branch}\`（base: \`${remote ? `${remote.defaultBranch} @ ` : ''}${baseSha.slice(0, 7)}\`）`,
+      `- head: \`${pr.headSha.slice(0, 12)}\``,
       `- 変更: ${diff.files.length} ファイル`,
-      `- テスト: ${testsSkipped ? '未実行（コマンド未設定）' : ctx.previous.testsPassed === false ? '✗ 失敗' : '✓ 通過'}`,
+      `- テスト: ${testsLine}`,
       '',
       '## 内容',
       '',
@@ -362,10 +404,12 @@ export class ClaudeRunner implements AgentRunner {
       String(ctx.previous.reviewSummary ?? ''),
       '',
       '---',
-      `ローカル版では GitHub に push しません。ブランチ \`${ctx.branch}\` を確認し、問題なければ人がマージしてください（AI はマージしません）。`,
+      remote
+        ? 'GitHub 上でレビューしてください。Approve で Run は完了、Request changes で同じ PR を修正します。マージは人が行います（AI はマージしません）。'
+        : `ローカル版では GitHub に push しません。ブランチ \`${ctx.branch}\` を確認し、問題なければ人がマージしてください（AI はマージしません）。`,
       '',
     ].join('\n');
-    await ctx.artifact('draft_pr', `Draft PR #${number}${update ? '（更新）' : ''}`, 'draft-pr.md', 'text/markdown', md);
-    return { status: 'succeeded', summary: `Draft PR #${number} ${update ? '更新' : '作成'}（ブランチ ${ctx.branch}）`, outcome: { pr } };
+    await ctx.artifact('draft_pr', `Draft PR #${pr.number}${update ? '（更新）' : ''}`, 'draft-pr.md', 'text/markdown', md);
+    return { status: 'succeeded', summary: `Draft PR #${pr.number} ${update ? '更新' : '作成'}（ブランチ ${ctx.branch}）`, outcome: { pr } };
   }
 }

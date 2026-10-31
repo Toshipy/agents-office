@@ -11,6 +11,7 @@ import { projects, repositoryBindings, runs, webhookDeliveries, workspaces } fro
 import type { EventBus } from '../events/bus';
 import { log } from '../lib/logger';
 import type { WorkflowEngine } from '../workflow/engine';
+import type { GithubApp } from './app';
 
 const MAX_DELIVERY_ATTEMPTS = 5;
 
@@ -25,7 +26,19 @@ export class Dispatcher {
     private readonly db: Db,
     private readonly bus: EventBus,
     private readonly engine: WorkflowEngine,
+    /** GitHub App 連携時のみ。Issue・レビューを受け付ける GitHub ユーザーを限定する */
+    private readonly github: GithubApp | null = null,
   ) {}
+
+  /**
+   * 実 GitHub のイベントは、許可した GitHub ユーザーの操作だけを受け付ける。公開リポジトリでは
+   * 誰でも Issue を作れるため、他人の Issue でエージェントが動いたり利用枠を消費したりしないようにする。
+   * シミュレーター（GitHub App 未設定）の場合は対象外。
+   */
+  private senderAllowed(binding: Binding, login: unknown): boolean {
+    if (binding.verification !== 'github_app') return true;
+    return this.github?.isAllowedUser(login) ?? false;
+  }
 
   start(intervalMs = 400) {
     this.timer = setInterval(() => void this.drain(), intervalMs);
@@ -97,6 +110,7 @@ export class Dispatcher {
     for (const binding of bindings) {
       if (d.eventType === 'issues') outcomes.push(await this.onIssue(binding, d));
       else if (d.eventType === 'pull_request_review') outcomes.push(await this.onReview(binding, d));
+      else if (d.eventType === 'pull_request') outcomes.push(await this.onPullRequest(binding, d));
       else {
         await this.record(binding, d, false, 'unhandled_event');
         outcomes.push('unhandled_event');
@@ -115,6 +129,7 @@ export class Dispatcher {
       return reason;
     };
     if (!Number.isSafeInteger(issueNumber)) return ignore('invalid_issue');
+    if (!this.senderAllowed(binding, p.sender?.login)) return ignore('sender_not_allowed');
     const eventName = `issues.${action}` as 'issues.opened' | 'issues.labeled';
     if (!binding.policy.events.includes(eventName)) return ignore('event_not_enabled');
     if (!binding.automationEnabled) return ignore('automation_disabled');
@@ -177,6 +192,10 @@ export class Dispatcher {
     }
     const state = String(p.review?.state ?? '').toLowerCase();
     const prNumber = Number(p.pull_request?.number);
+    if (!this.senderAllowed(binding, p.review?.user?.login ?? p.sender?.login)) {
+      await this.record(binding, d, false, 'reviewer_not_allowed');
+      return 'reviewer_not_allowed';
+    }
     if (!Number.isSafeInteger(prNumber) || (state !== 'approved' && state !== 'changes_requested')) {
       await this.record(binding, d, false, 'review_state_ignored');
       return 'review_state_ignored';
@@ -207,5 +226,38 @@ export class Dispatcher {
     });
     await this.record(binding, d, result === 'approved' || result === 'revision_started' || result === 'escalated', result, run.id);
     return result;
+  }
+
+  /** PR がマージ / クローズされたら Run を終える（マージは人の操作。AI はマージしない） */
+  private async onPullRequest(binding: Binding, d: Delivery): Promise<string> {
+    const p = d.payload as Record<string, any>;
+    const prNumber = Number(p.pull_request?.number);
+    if (d.action !== 'closed' || !Number.isSafeInteger(prNumber)) {
+      await this.record(binding, d, false, 'pr_action_ignored');
+      return 'pr_action_ignored';
+    }
+    const [run] = await this.db
+      .select()
+      .from(runs)
+      .where(
+        and(
+          eq(runs.workspaceId, binding.workspaceId),
+          eq(runs.projectId, binding.projectId),
+          sql`(${runs.pr} ->> 'number')::int = ${prNumber}`,
+          sql`${runs.status} not in (${sql.join(
+            TERMINAL_RUN_STATUSES.map((st) => sql`${st}`),
+            sql`, `,
+          )})`,
+        ),
+      );
+    if (!run) {
+      await this.record(binding, d, false, 'no_matching_run');
+      return 'no_matching_run';
+    }
+    const merged = p.pull_request?.merged === true;
+    const result = merged ? await this.engine.completeMergedRun(run.id) : await this.engine.cancelRun(run.id, `PR #${prNumber} がマージされずにクローズされました`);
+    const outcome = merged ? (result ? 'run_completed_merged' : 'merge_not_applied') : result ? 'run_cancelled_pr_closed' : 'close_not_applied';
+    await this.record(binding, d, Boolean(result), outcome, run.id);
+    return outcome;
   }
 }

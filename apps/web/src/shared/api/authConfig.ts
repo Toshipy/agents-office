@@ -4,6 +4,8 @@ import { api } from './client';
 export interface AuthConfig {
   mode: string;
   devRoutes: boolean;
+  /** 新規登録できるか（サーバーでは最初の 1 人だけ等） */
+  signup?: boolean;
   devAccounts: { username: string; password: string; displayName: string }[];
 }
 

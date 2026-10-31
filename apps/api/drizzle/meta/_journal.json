@@ -15,6 +15,13 @@
       "when": 1793457200560,
       "tag": "0001_claude_runtime",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793474530730,
+      "tag": "0002_github_app",
+      "breakpoints": true
     }
   ]
 }

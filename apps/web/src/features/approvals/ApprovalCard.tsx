@@ -98,7 +98,15 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
             <dl className="kv cols">
               <div>
                 <dt>Draft PR</dt>
-                <dd className="mono">#{p.pr?.number}</dd>
+                <dd className="mono">
+                  {typeof p.pr?.url === 'string' && p.pr.url.startsWith('https://') ? (
+                    <a href={p.pr.url} target="_blank" rel="noreferrer">
+                      #{p.pr?.number}
+                    </a>
+                  ) : (
+                    `#${p.pr?.number}`
+                  )}
+                </dd>
               </div>
               <div>
                 <dt>ブランチ</dt>

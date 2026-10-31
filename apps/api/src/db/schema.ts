@@ -102,8 +102,12 @@ export const repositoryBindings = pgTable(
     /** FR-022: 自動起動は明示 ON、初期 OFF */
     automationEnabled: boolean('automation_enabled').notNull().default(false),
     policy: jsonb('policy_json').$type<RepoPolicy>().notNull(),
-    /** ローカル版は GitHub App の代わりにシミュレーターで検証 */
-    verification: text('verification').notNull().default('simulated'),
+    /** simulated = ローカルの GitHub シミュレーター / github_app = GitHub App で検証済みの実リポジトリ */
+    verification: text('verification').$type<'simulated' | 'github_app'>().notNull().default('simulated'),
+    /** GitHub App 連携時: 既定ブランチ（PR の base・作業の起点） */
+    defaultBranch: text('default_branch'),
+    /** GitHub App 連携時: 資格情報を含まないクローン URL */
+    cloneUrl: text('clone_url'),
     /** ローカルの git リポジトリ（設定すると Claude がこのリポジトリの worktree で作業する） */
     localPath: text('local_path'),
     /** Tester が worktree で実行するコマンド（利用者が明示的に設定したものだけ実行） */
