@@ -1,0 +1,170 @@
+/**
+ * Hono API（ADR-003）。createServices() で依存を組み立て、createApp() でルートを登録する。
+ * テストでは PGlite をメモリで起動し、app.request() で検証する。
+ */
+import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { Hono } from 'hono';
+import { secureHeaders } from 'hono/secure-headers';
+import type { PGlite } from '@electric-sql/pglite';
+import type { AppConfig } from './config';
+import { openDb, type Db } from './db/client';
+import { EventBus } from './events/bus';
+import { AppError } from './lib/errors';
+import { log, setLogLevel } from './lib/logger';
+import { ArtifactStore } from './workflow/artifactStore';
+import { WorkflowEngine } from './workflow/engine';
+import { SimulatedRunner } from './agents/simulated';
+import type { AgentRunner } from './agents/runner';
+import { Dispatcher } from './github/dispatcher';
+import { MAX_WEBHOOK_BYTES, receiveGithubWebhook } from './github/webhook';
+import { SeatWatcher } from './services/office';
+import { csrfGuard, requireAuth, type AuthContext } from './auth/session';
+import { registerAuthRoutes } from './routes/auth';
+import { registerWorkspaceRoutes } from './routes/workspace';
+import { registerProjectRoutes } from './routes/projects';
+import { registerRunRoutes } from './routes/runs';
+import { registerApprovalRoutes } from './routes/approvals';
+import { registerEventRoutes } from './routes/events';
+import { registerDevRoutes } from './routes/dev';
+
+export interface Services {
+  db: Db;
+  client: PGlite;
+  config: AppConfig;
+  bus: EventBus;
+  store: ArtifactStore;
+  engine: WorkflowEngine;
+  dispatcher: Dispatcher;
+  seats: SeatWatcher;
+}
+
+export type AppEnv = {
+  Variables: {
+    requestId: string;
+    auth: AuthContext | undefined;
+  };
+};
+
+export async function createServices(config: AppConfig, runner?: AgentRunner): Promise<Services> {
+  setLogLevel(config.logLevel);
+  const { db, client } = await openDb(config.dataDir);
+  const bus = new EventBus(db);
+  const store = new ArtifactStore(db, config.dataDir === 'memory' ? 'memory' : config.artifactsDir);
+  const engine = new WorkflowEngine(
+    db,
+    bus,
+    store,
+    runner ?? new SimulatedRunner({ randomFailures: config.simRandomFailures }),
+    config,
+  );
+  const dispatcher = new Dispatcher(db, bus, engine);
+  const seats = new SeatWatcher(db, bus);
+  return { db, client, config, bus, store, engine, dispatcher, seats };
+}
+
+export function createApp(s: Services) {
+  const app = new Hono<AppEnv>();
+
+  app.use('*', async (c, next) => {
+    const requestId = randomUUID();
+    c.set('requestId', requestId);
+    c.header('X-Request-Id', requestId);
+    const started = Date.now();
+    await next();
+    if (!c.req.path.startsWith('/v1/events/stream')) {
+      log.debug('request', { requestId, method: c.req.method, path: c.req.path, status: c.res.status, ms: Date.now() - started });
+    }
+  });
+  app.use(
+    '*',
+    secureHeaders({
+      contentSecurityPolicy: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'blob:'],
+        fontSrc: ["'self'", 'data:'],
+        connectSrc: ["'self'"],
+        workerSrc: ["'self'", 'blob:'],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+        baseUri: ["'self'"],
+      },
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
+
+  app.onError((err, c) => {
+    const requestId = c.get('requestId') ?? 'unknown';
+    if (err instanceof AppError) {
+      return c.json({ code: err.code, message: err.message, requestId, ...(err.details ? { details: err.details } : {}) }, err.status);
+    }
+    log.error('unhandled error', { requestId, path: c.req.path, err: String(err), stack: (err as Error).stack });
+    return c.json({ code: 'INTERNAL', message: 'サーバー内部でエラーが発生しました', requestId }, 500);
+  });
+  app.notFound((c) => {
+    if (c.req.path.startsWith('/v1') || c.req.path.startsWith('/integrations')) {
+      return c.json({ code: 'NOT_FOUND', message: 'エンドポイントが見つかりません', requestId: c.get('requestId') }, 404);
+    }
+    return c.text('Not Found', 404);
+  });
+
+  app.get('/v1/health', (c) =>
+    c.json({ ok: true, mode: 'local', inflightSteps: s.engine.inflightCount(), sseClients: s.bus.subscriberCount() }),
+  );
+
+  /** GitHub Webhook（ユーザー API とは分離: 基本設計書 6.1） */
+  app.post('/integrations/github/webhook', async (c) => {
+    const len = Number(c.req.header('content-length') ?? 0);
+    if (len > MAX_WEBHOOK_BYTES) return c.json({ status: 'rejected', code: 'PAYLOAD_TOO_LARGE' }, 413);
+    const raw = Buffer.from(await c.req.arrayBuffer());
+    const res = await receiveGithubWebhook(s.db, s.config, raw, { get: (n) => c.req.header(n) ?? null });
+    if (res.status === 202) void s.dispatcher.drain();
+    return c.json(res.body, res.status as 200);
+  });
+
+  app.use('/v1/*', csrfGuard(s));
+  registerAuthRoutes(app, s);
+  app.use('/v1/*', async (c, next) => {
+    if (c.req.path.startsWith('/v1/auth/') || c.req.path === '/v1/health') return next();
+    return requireAuth(s)(c, next);
+  });
+  registerWorkspaceRoutes(app, s);
+  registerProjectRoutes(app, s);
+  registerRunRoutes(app, s);
+  registerApprovalRoutes(app, s);
+  registerEventRoutes(app, s);
+  if (s.config.enableDevRoutes) registerDevRoutes(app, s);
+
+  // ビルド済み SPA の配信（pnpm start）。/v1 と /integrations 以外は index.html にフォールバック
+  if (s.config.serveWebDist && existsSync(resolve(s.config.serveWebDist, 'index.html'))) {
+    const dist = s.config.serveWebDist;
+    const indexHtml = readFileSync(resolve(dist, 'index.html'), 'utf8');
+    const types: Record<string, string> = {
+      '.js': 'text/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.svg': 'image/svg+xml',
+      '.png': 'image/png',
+      '.woff2': 'font/woff2',
+      '.woff': 'font/woff',
+      '.json': 'application/json',
+      '.ico': 'image/x-icon',
+    };
+    app.get('*', (c) => {
+      const path = decodeURIComponent(new URL(c.req.url).pathname);
+      if (path.startsWith('/v1') || path.startsWith('/integrations')) return c.notFound();
+      const file = resolve(dist, `.${path}`);
+      if (file.startsWith(resolve(dist)) && path !== '/' && existsSync(file)) {
+        const ext = file.slice(file.lastIndexOf('.'));
+        c.header('Content-Type', types[ext] ?? 'application/octet-stream');
+        if (path.startsWith('/assets/')) c.header('Cache-Control', 'public, max-age=31536000, immutable');
+        return c.body(readFileSync(file));
+      }
+      return c.html(indexHtml);
+    });
+  }
+
+  return app;
+}

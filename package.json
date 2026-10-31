@@ -1,0 +1,27 @@
+{
+  "name": "personal-ai-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,magenta \"pnpm --filter @paw/api dev\" \"pnpm --filter @paw/web dev\"",
+    "build": "pnpm --filter @paw/web build",
+    "start": "pnpm --filter @paw/web build && pnpm --filter @paw/api start",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "db:reset": "node -e \"require('fs').rmSync('.data',{recursive:true,force:true});console.log('removed .data')\"",
+    "webhook:send": "pnpm --filter @paw/api exec tsx scripts/send-webhook.ts"
+  },
+  "devDependencies": {
+    "concurrently": "9.2.5",
+    "typescript": "6.0.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
