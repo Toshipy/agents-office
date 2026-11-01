@@ -29,6 +29,11 @@ uname -m
 - **おすすめ:** ターミナルを終了 → Finder の「アプリケーション → ユーティリティ → ターミナル」を右クリック →「情報を見る」→ **「Rosetta を使用して開く」のチェックを外す** → ターミナルを開き直して `uname -m` が `arm64` になったことを確認
 - **一時的に:** 以下の `brew` コマンドの先頭に `arch -arm64` を付けて実行する（例: `arch -arm64 brew install hashicorp/tap/terraform`）
 
+Homebrew が `Your Command Line Tools (CLT) does not support macOS …` で止まる場合は、Xcode の Command Line Tools が今の macOS に対応していません。
+
+- **おすすめ:** 「システム設定 → 一般 → ソフトウェアアップデート」で Command Line Tools を更新する。更新が出てこない場合は、Homebrew の案内どおり `sudo rm -rf /Library/Developer/CommandLineTools` → `sudo xcode-select --install` で入れ直す（入れ直しが終わるまで `git` なども使えなくなります）
+- **Homebrew を使わない方法:** Terraform は 1 つの実行ファイルなので、HashiCorp の配布サイト（https://releases.hashicorp.com/terraform/）から `darwin_arm64` の zip を取得して、中の `terraform` を PATH の通った場所に置いても使えます
+
 Terraform（HashiCorp の公式 tap）:
 
 ```bash
