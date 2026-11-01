@@ -15,6 +15,7 @@ EnvironmentFile=/etc/paw/paw.env
 # claude（~/.local/bin）と pnpm を見つけられるようにする
 Environment=PATH=/home/paw/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PAW_SERVE_WEB=1
+Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/env pnpm --filter @paw/api start
 Restart=on-failure

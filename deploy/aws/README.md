@@ -3,6 +3,8 @@
 PC を閉じていても、GitHub の Issue にラベルを付けると AI が作業し、Draft PR を作る構成です。利用者は自分 1 人、AI は Claude のサブスク（Pro など）を使います。
 ドメインは不要です。HTTPS の URL（`https://<名前>.<tailnet名>.ts.net`）は Tailscale Funnel から無料でもらいます。
 
+> **Terraform でまとめて作る場合は [terraform/README.md](terraform/README.md) を使ってください。** EC2 の作成からアプリの起動までを自動で行い、SSH の代わりに Session Manager で入ります。以下は同じ構成を手作業で作る手順です。
+
 ```text
 GitHub ──Webhook(HTTPS)──▶ Tailscale Funnel ──▶ API :8787（127.0.0.1 のみ）──▶ Claude Code CLI（サブスクのトークン）
    ▲                                               │

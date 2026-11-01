@@ -8,3 +8,10 @@ test-results/
 playwright-report/
 apps/web/.vite/
 dist-demo/
+
+# Terraform（state には AWS の情報が入るのでコミットしない）
+deploy/aws/terraform/.terraform/
+deploy/aws/terraform/*.tfstate
+deploy/aws/terraform/*.tfstate.*
+deploy/aws/terraform/terraform.tfvars
+deploy/aws/terraform/.terraform.lock.hcl

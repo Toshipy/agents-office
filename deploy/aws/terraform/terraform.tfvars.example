@@ -1,0 +1,11 @@
+# terraform.tfvars にコピーして値を入れる（このファイルに秘密情報は書かない）
+github_app_id        = "1234567"
+github_allowed_users = "Toshipy"
+
+# 以下は既定値のままでよい
+# region             = "ap-northeast-1"
+# instance_type      = "t4g.medium"
+# architecture       = "arm64"
+# root_volume_gb     = 30
+# tailscale_hostname = "paw"
+# app_repo_ref       = "claude/intelligent-keller-3gj7mv"
