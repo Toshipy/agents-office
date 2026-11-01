@@ -145,6 +145,7 @@ Claude Code の起動方法（工程ごとに `claude -p` を 1 回呼びます�
 **確認できていること・いないこと:** この開発環境では本物の `claude` を呼べない（利用者のサブスクで動かせない）ため、公式ドキュメントの出力形式（`stream-json` の init / assistant / rate_limit_event / result）を再現した**偽の CLI でのテストまで**です。
 お手元の Pro アカウントでの実際の動作（特に `--restricted` でサブスクのログインが使えるか、利用上限時に CLI が実際に出す内容）は未確認です。
 もし `--restricted` で問題が出る場合は `PAW_CLAUDE_CODE_RESTRICTED=0` で無効化できます（その場合も `--setting-sources user` でリポジトリ側の設定は読みません）。
+利用者の Mac では、`claude auth login` でログインし直し、`PAW_CLAUDE_CODE_RESTRICTED=0` を付けた状態で、計画 → 実装 → レビュー → GitHub への Draft PR 作成まで動作しました（制限モードだけが原因だったかは未切り分け）。
 Windows は未対応です（macOS / Linux を想定）。
 
 ### B. API キー（Claude API）で動かす

@@ -107,9 +107,9 @@ pnpm --filter @paw/web build
 exit
 ```
 
-## 4. GitHub App を作る
+## 4. GitHub App を作る（ローカルで作った App を使い回す場合は 4' へ）
 
-GitHub の **Settings → Developer settings → GitHub Apps → New GitHub App** で作成します。
+自分のアカウントの **Settings → Developer settings → GitHub Apps → New GitHub App**（https://github.com/settings/apps/new）で作成します。リポジトリの Settings ではありません。
 
 | 項目 | 値 |
 |---|---|
@@ -142,6 +142,17 @@ sudo mv /tmp/github-app.pem /etc/paw/github-app.pem && sudo chown root:paw /etc/
 3. **Install App** から、AI に作業させたいリポジトリだけを選んでインストールする。
 
 このアプリにはマージを行う処理がなく、Tool Broker でも常に拒否します。ただし上の権限（Contents / Pull requests の書き込み）は GitHub の仕組み上マージも可能な権限なので、念のため対象リポジトリの既定ブランチに**ブランチ保護（PR とレビュー必須）**を設定しておくことをおすすめします。
+
+## 4'. ローカルで試した App を使い回す場合
+
+https://github.com/settings/apps で App の **Edit** を開き、次を変更します。
+
+1. **General → Webhook**: **Active** にチェック、Webhook URL に `https://paw.example.com/integrations/github/webhook`、Webhook secret に `openssl rand -hex 32` で作った値（`PAW_GITHUB_WEBHOOK_SECRET` と同じ値）を入れて保存。
+2. **Permissions & events → Subscribe to events**: **Issues** / **Pull request** / **Pull request review** にチェックして保存。
+3. **General → Private keys → Generate a private key**: サーバー用に**新しい鍵**を作る（手元の PC の鍵とは分けておくと、片方だけ無効にできる）。
+4. App ID は変わりません（**General → About** の App ID。インストール画面の URL の数字ではありません）。
+
+Webhook を有効にすると GitHub からの通知はサーバーに届くようになります。手元の PC からの push と Draft PR 作成はそのまま使えます。
 
 ## 5. サブスクのトークンを作る（手元の PC で）
 
@@ -197,6 +208,20 @@ sudo cp /home/paw/agents-office/deploy/aws/Caddyfile /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
 
+Claude Code がサーバーのトークンで動くかを先に確認します（`ok` と返れば OK。利用枠はほとんど使いません）:
+
+```bash
+sudo -u paw bash -c 'set -a; . /etc/paw/paw.env; set +a; cd /tmp && ~/.local/bin/claude -p "ok とだけ返して"'
+```
+
+続けて、アプリが使う制限モード（`--restricted`）でも動くかを確認します:
+
+```bash
+sudo -u paw bash -c 'set -a; . /etc/paw/paw.env; set +a; cd /tmp && ~/.local/bin/claude -p "ok とだけ返して" --restricted'
+```
+
+認証エラーになる場合は `/etc/paw/paw.env` の `PAW_CLAUDE_CODE_RESTRICTED=0` のままにします（手元の PC では、この設定で動作を確認済み）。`ok` と返る場合は `1` にすると、Claude Code が利用者・リポジトリの設定を読まない、より制限の強い起動になります。
+
 起動の確認（`agent runtime` に `claude_code`、`github app` に App ID が出ていれば OK）:
 
 ```bash
@@ -237,4 +262,4 @@ sudo journalctl -u paw -n 50 --no-pager
 
 - **Draft PR とプラン:** GitHub のプランとリポジトリの公開設定によっては、Draft PR が作れない場合があります（GitHub Free の非公開リポジトリなど）。その場合 Run は `GITHUB_REJECTED` で止まります（GitHub の正確な条件は未確認です）。
 - **ドメインがない場合:** この手順はドメインがある前提です。ない場合は別の方法（Cloudflare Tunnel や Tailscale Funnel など）が必要で、手順は未作成です。
-- **`--restricted` モード:** サブスクのトークン（`CLAUDE_CODE_OAUTH_TOKEN`）で動くことは未確認です。問題があれば `/etc/paw/paw.env` に `PAW_CLAUDE_CODE_RESTRICTED=0` を追加してください。
+- **`--restricted` モード:** 手元の PC では「ログインし直し」と「`PAW_CLAUDE_CODE_RESTRICTED=0`」を同時に行って動いたため、制限モード自体がサブスクで動くかは切り分けられていません。手順 7 の確認コマンドで判断してください。`0` の場合も、リポジトリ側の設定（hooks・`.mcp.json`）は読まず、シェルも渡しません。サーバーの `paw` ユーザーには個人の Claude Code 設定が無いので、手元の PC より影響は小さくなります。
