@@ -18,6 +18,17 @@
 
 ## 0. 手元の Mac の準備
 
+まず、ターミナルが Apple Silicon（arm64）のまま動いているかを確認します:
+
+```bash
+uname -m
+```
+
+`arm64` なら OK です。`x86_64` と出る場合は、ターミナルが Rosetta 2（Intel 用の互換モード）で動いていて、Homebrew が `Cannot install under Rosetta 2 in ARM default prefix` で止まります。次のどちらかで対処してください。
+
+- **おすすめ:** ターミナルを終了 → Finder の「アプリケーション → ユーティリティ → ターミナル」を右クリック →「情報を見る」→ **「Rosetta を使用して開く」のチェックを外す** → ターミナルを開き直して `uname -m` が `arm64` になったことを確認
+- **一時的に:** 以下の `brew` コマンドの先頭に `arch -arm64` を付けて実行する（例: `arch -arm64 brew install hashicorp/tap/terraform`）
+
 Terraform（HashiCorp の公式 tap）:
 
 ```bash

@@ -31,6 +31,8 @@ pnpm install
 pnpm dev
 ```
 
+Apple Silicon の Mac で `Cannot find native binding` や Homebrew の `Cannot install under Rosetta 2` が出る場合は、ターミナルが Rosetta 2（Intel 用の互換モード）で動いています。`uname -m` が `x86_64` なら、ターミナルの「情報を見る」で「Rosetta を使用して開く」を外して開き直してください（`arm64` になれば OK）。このリポジトリは Apple Silicon 用と Intel 用の両方のネイティブファイルを入れる設定なので、どちらのモードでも `pnpm dev` は動く想定です。
+
 ブラウザで http://localhost:5173 を開き、ログイン画面の「ローカルデモ用アカウント」から **Alice** を選びます。
 
 | アカウント | パスワード | 内容 |
