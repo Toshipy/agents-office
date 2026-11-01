@@ -195,6 +195,14 @@ describe('Claude Code (subscription) runtime — fake CLI', () => {
     const detail = await req('GET', `/v1/runs/${runId}`);
     expect(detail.body.run.runtime).toBe('claude_code');
     expect(detail.body.run.model).toBe('claude-test-model');
+    // 工程の表示は実際に応答したモデル名（シミュレーション用の名前を出さない）
+    expect(detail.body.steps.map((x: any) => `${x.key}:${x.model}`)).toEqual([
+      'plan:claude-test-model',
+      'implement:claude-test-model',
+      'test:test-command',
+      'review:claude-test-model',
+      'draft_pr:policy-broker',
+    ]);
     expect(detail.body.usage.measurement).toBe('subscription');
   });
 

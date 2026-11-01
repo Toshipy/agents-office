@@ -499,6 +499,14 @@ export class WorkflowEngine {
     }
   }
 
+  /** 工程に表示するモデル名（Claude の工程は実行後に実際のモデル名で上書きする） */
+  private stepModelLabel(runtime: AgentRuntime, role: StepRole, agentModel: string | null): string {
+    if (role === 'tool_broker') return 'policy-broker';
+    if (runtime === 'simulated') return agentModel ?? 'simulated-local';
+    if (role === 'tester') return 'test-command';
+    return runtime === 'claude' ? this.config.claudeModel : (this.config.claudeCode.model ?? 'claude-code');
+  }
+
   private async prepareStep(step: StepRow) {
     const [run] = await this.db.select().from(runs).where(eq(runs.id, step.runId));
     if (!run || TERMINAL_RUN_STATUSES.includes(run.status) || run.status === 'waiting_review' || run.status === 'needs_input') {
@@ -527,7 +535,7 @@ export class WorkflowEngine {
           )[0] ?? null;
     const [updated] = await this.db
       .update(runSteps)
-      .set({ agentId: agent?.id ?? null, agentVersion: agent?.version ?? null, model: agent?.model ?? 'policy-broker' })
+      .set({ agentId: agent?.id ?? null, agentVersion: agent?.version ?? null, model: this.stepModelLabel(run.runtime, step.role, agent?.model ?? null) })
       .where(eq(runSteps.id, step.id))
       .returning();
     const prior = await this.db
@@ -679,6 +687,10 @@ export class WorkflowEngine {
         return row;
       },
       usage: async (model, inputTokens, outputTokens, durationMs, extra) => {
+        // Claude で実行した工程は、実際に応答したモデル名を工程に記録する
+        if (run.runtime !== 'simulated' && model) {
+          await this.db.update(runSteps).set({ model: model.slice(0, 80) }).where(eq(runSteps.id, step.id));
+        }
         const cost = extra?.costUsd ?? (inputTokens * SIM_PRICE_PER_MTOK.input + outputTokens * SIM_PRICE_PER_MTOK.output) / 1_000_000;
         await this.db.insert(usageRecords).values({
           id: newId('use'),
