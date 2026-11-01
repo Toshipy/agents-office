@@ -54,7 +54,7 @@ export function ProjectsPage() {
           </div>
         </section>
       ) : null}
-      {creating ? <CreateProject onDone={() => { setCreating(false); refresh(); }} /> : null}
+      {creating ? <CreateProject githubApp={githubApp} onDone={() => { setCreating(false); refresh(); }} /> : null}
       <datalist id="github-repo-candidates">
         {candidates.map((c) => (
           <option key={c} value={c} />
@@ -79,7 +79,7 @@ export function ProjectsPage() {
   );
 }
 
-function CreateProject({ onDone }: { onDone(): void }) {
+function CreateProject({ onDone, githubApp }: { onDone(): void; githubApp: boolean }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [color, setColor] = useState(COLORS[0]);
@@ -89,7 +89,16 @@ function CreateProject({ onDone }: { onDone(): void }) {
     setBusy(true);
     try {
       const p = await api.post<ProjectDto>('/v1/projects', { name, description, color });
-      if (repo.trim()) await api.post(`/v1/projects/${p.id}/repositories`, { fullName: repo.trim() });
+      if (repo.trim()) {
+        try {
+          await api.post(`/v1/projects/${p.id}/repositories`, { fullName: repo.trim() });
+        } catch (e) {
+          // Project はできているので、Repo だけ後から接続し直せるようにする
+          toast({ tone: 'error', title: 'Project は作成しましたが、Repo を接続できませんでした', body: errMsg(e) });
+          onDone();
+          return;
+        }
+      }
       toast({ tone: 'success', title: 'Project を作成しました', body: p.name });
       onDone();
     } catch (e) {
@@ -107,8 +116,14 @@ function CreateProject({ onDone }: { onDone(): void }) {
           <input value={name} onChange={(e) => setName(e.target.value)} maxLength={60} />
         </label>
         <label>
-          Repo（owner/repo・ローカル GitHub シミュレーター）
-          <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="me/my-app" className="mono" />
+          {githubApp ? 'Repo（owner/repo・GitHub App をインストールしたリポジトリ）' : 'Repo（owner/repo・ローカル GitHub シミュレーター）'}
+          <input
+            value={repo}
+            onChange={(e) => setRepo(e.target.value)}
+            placeholder="me/my-app"
+            className="mono"
+            list={githubApp ? 'github-repo-candidates' : undefined}
+          />
         </label>
         <label className="span-2">
           説明

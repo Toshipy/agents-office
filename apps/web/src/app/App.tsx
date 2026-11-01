@@ -132,11 +132,17 @@ function Shell({ me }: { me: Me }) {
   const pending = snapshot?.approvalsPending ?? 0;
   const paused = snapshot?.workspace.settings.paused ?? me.workspace.settings.paused;
   const logout = async () => {
-    await api.post('/v1/auth/logout');
-    qc.clear();
+    try {
+      await api.post('/v1/auth/logout');
+    } catch {
+      // サーバー側のセッションが既に無い場合も、画面はログアウト状態にする
+    }
+    // 先にログイン情報を「未ログイン」にしてログイン画面へ切り替える。
+    // qc.clear() で me ごと消すと、表示中のコンポーネントが古いログイン情報を持ったまま読み込み中で止まる
+    qc.setQueryData(['me'], null);
     useOffice.getState().reset();
+    qc.removeQueries({ predicate: (q) => q.queryKey[0] !== 'me' });
     navigate('/office');
-    await qc.invalidateQueries({ queryKey: ['me'] });
   };
   return (
     <div className="shell">
