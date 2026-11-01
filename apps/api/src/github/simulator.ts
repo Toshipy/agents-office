@@ -61,6 +61,8 @@ export async function simulateIssue(
     .from(repositoryBindings)
     .where(and(eq(repositoryBindings.workspaceId, args.workspaceId), eq(repositoryBindings.projectId, args.projectId)));
   if (!binding) throw new AppError(422, 'REPO_NOT_CONNECTED', 'この Project には Repo が接続されていません');
+  // 本物の GitHub につないだ Repo には、実在しない Issue を作らない
+  if (binding.verification === 'github_app') throw new AppError(422, 'REAL_GITHUB_REPO', 'GitHub App で接続した Repo にはシミュレーターから Issue を送れません。GitHub で Issue を作成してください');
   const [{ number }] = await db
     .update(repositoryBindings)
     .set({ nextIssueNumber: sql`${repositoryBindings.nextIssueNumber} + 1` })
@@ -101,6 +103,7 @@ export async function simulateReview(
   }
   const [binding] = await db.select().from(repositoryBindings).where(eq(repositoryBindings.projectId, run.projectId));
   if (!binding) throw new AppError(422, 'REPO_NOT_CONNECTED', 'Repo が接続されていません');
+  if (binding.verification === 'github_app') throw new AppError(422, 'REAL_GITHUB_REPO', 'GitHub App で接続した Repo の PR は、GitHub 上でレビューしてください');
   const payload = {
     action: 'submitted',
     review: {

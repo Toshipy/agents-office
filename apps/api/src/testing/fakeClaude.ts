@@ -24,6 +24,11 @@ let stdin = '';
 for await (const c of process.stdin) stdin += c;
 const opt = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null; };
 const schema = opt('--json-schema');
+// 実際の Claude Code 2.1.295 は draft 2020-12 の $schema を受け付けなかった（利用者の環境で確認）
+if (schema && JSON.parse(schema).$schema) {
+  process.stderr.write('Error: --json-schema is not a valid JSON Schema: no schema with key or ref "' + JSON.parse(schema).$schema + '"\n');
+  process.exit(1);
+}
 const purpose = schema ? (schema.includes('verdict') ? 'review' : 'plan') : 'develop';
 const countsFile = join(here, 'counts.json');
 const counts = existsSync(countsFile) ? JSON.parse(readFileSync(countsFile, 'utf8')) : {};

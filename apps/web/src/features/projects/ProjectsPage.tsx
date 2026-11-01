@@ -332,12 +332,13 @@ function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto;
             </button>
           </div>
           <p className="hint">対象: issues.opened / issues.labeled のうち、ラベル「{p.repository.policy.triggerLabel}」が付いた Issue のみ。条件不一致は記録だけ残し、Run は作りません。</p>
-          {devRoutes ? (
+          {/* 本物の GitHub につないだ Repo では、偽の Issue で Run が始まらないようシミュレーターを出さない */}
+          {devRoutes && !p.repository.managedCheckout ? (
             <button className="btn ghost small" onClick={() => setSim((v) => !v)}>
               <Icon name="send" size={13} /> GitHub シミュレーターで Issue を送る
             </button>
           ) : null}
-          {sim && devRoutes ? <IssueSimulator project={p} /> : null}
+          {sim && devRoutes && !p.repository.managedCheckout ? <IssueSimulator project={p} /> : null}
         </div>
       ) : null}
     </section>

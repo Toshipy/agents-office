@@ -36,6 +36,8 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
   const p = a.payload;
   const devRoutes = useAuthConfig().data?.devRoutes ?? false;
   const usageLimit = a.actionType === 'clarification' && p.reason === 'usage_limit';
+  /** 本物の GitHub の PR（シミュレーターではレビューできない） */
+  const realPr = typeof p.pr?.url === 'string' && p.pr.url.startsWith('https://');
   const resetsAt = usageLimit && typeof p.resetsAt === 'string' ? new Date(p.resetsAt) : null;
   const beforeReset = resetsAt !== null && resetsAt.getTime() > Date.now();
 
@@ -178,8 +180,11 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
 
       {pending ? (
         <footer className="ap-actions">
-          {a.actionType === 'pr_review' && !devRoutes ? (
-            <span className="muted small">GitHub 上でレビューしてください（レビューイベントを受信すると反映されます）</span>
+          {a.actionType === 'pr_review' && (!devRoutes || realPr) ? (
+            <span className="muted small">
+              GitHub 上でレビューしてください（レビューイベントを受信すると反映されます）
+              {realPr && devRoutes ? '。ローカルでは GitHub からの通知が届かないため、確認が済んだら Run を中止してください' : ''}
+            </span>
           ) : a.actionType === 'pr_review' ? (
             <>
               <span className="muted small">GitHub シミュレーター:</span>

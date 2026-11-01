@@ -110,6 +110,17 @@ interface StreamState {
   refusal: boolean;
 }
 
+/**
+ * --json-schema に渡すスキーマ。Zod が付ける `$schema`（draft 2020-12 の URL）を、
+ * Claude Code 2.1.295 は「no schema with key or ref」として受け付けなかった（利用者の環境で確認）。
+ * 使っているキーワード（type / properties / required / items / enum / additionalProperties）は
+ * draft-07 と共通なので、`$schema` を外して渡す。
+ */
+export function cliJsonSchema(schema: z.ZodType): Record<string, unknown> {
+  const { $schema: _ignored, ...rest } = z.toJSONSchema(schema) as Record<string, unknown>;
+  return rest;
+}
+
 /** rate_limit_event.resetsAt（数値）を ISO 文字列に。秒・ミリ秒のどちらでも受け、ありえない値は捨てる */
 export function resetsAtToIso(v: unknown): string | null {
   if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return null;
@@ -156,7 +167,7 @@ export class ClaudeCodeBackend implements ModelBackend {
       tools: read.allowed ? ['Read', 'Grep', 'Glob'] : [],
       permissionMode: 'dontAsk',
       maxTurns: req.purpose === 'plan' ? this.opts.maxTurns.plan : this.opts.maxTurns.review,
-      jsonSchema: z.toJSONSchema(req.schema) as Record<string, unknown>,
+      jsonSchema: cliJsonSchema(req.schema),
     });
     const parsed = req.schema.safeParse(result.structured_output);
     if (!parsed.success) {
@@ -384,7 +395,7 @@ export class ClaudeCodeBackend implements ModelBackend {
     }
     if (!r) {
       const tail = stderr.trim().slice(-600);
-      if (/unknown option|unknown command|unknown argument|error: option|too many arguments|invalid value/i.test(tail)) {
+      if (/unknown option|unknown command|unknown argument|error: option|too many arguments|invalid value|is not a valid JSON Schema/i.test(tail)) {
         throw new RunnerError(
           `Claude Code がオプションを受け付けませんでした。バージョンが古い可能性があります（\`claude update\` で更新してください）: ${tail}`,
           'CLAUDE_CODE_CLI_ERROR',
