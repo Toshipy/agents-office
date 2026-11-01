@@ -1,41 +1,63 @@
-# AWS（EC2 1 台）で常時動かす手順
+# AWS（EC2 1 台）＋ Tailscale Funnel で常時動かす手順
 
 PC を閉じていても、GitHub の Issue にラベルを付けると AI が作業し、Draft PR を作る構成です。利用者は自分 1 人、AI は Claude のサブスク（Pro など）を使います。
+ドメインは不要です。HTTPS の URL（`https://<名前>.<tailnet名>.ts.net`）は Tailscale Funnel から無料でもらいます。
 
 ```text
-GitHub ──Webhook(HTTPS)──▶ Caddy :443 ──▶ API :8787（127.0.0.1 のみ）──▶ Claude Code CLI（サブスクのトークン）
-   ▲                                          │
-   └────────── push（ai/ ブランチ）・Draft PR ◀─┘（GitHub App の短期トークン）
-ブラウザ ──HTTPS──▶ Caddy ──▶ 画面（ログイン必須・新規登録は最初の 1 人だけ）
+GitHub ──Webhook(HTTPS)──▶ Tailscale Funnel ──▶ API :8787（127.0.0.1 のみ）──▶ Claude Code CLI（サブスクのトークン）
+   ▲                                               │
+   └────────── push（ai/ ブランチ）・Draft PR ◀──────┘（GitHub App の短期トークン）
+ブラウザ ──HTTPS──▶ Tailscale Funnel ──▶ 画面（ログイン必須・新規登録は最初の 1 人だけ）
 ```
 
-> **確認状況**: この手順とアプリの GitHub 連携は、GitHub API のモックと git の bare リポジトリを使ったテストまでで確認しています。
-> 実際の AWS・GitHub・サブスクでの動作は未確認です。うまくいかない箇所があれば、ログ（`journalctl -u paw`）を教えてください。
+EC2 は外からの接続を受け付けません（受信ポートは SSH だけ、それも自分の IP に限定）。Funnel は EC2 から Tailscale へ外向きにつなぎ、届いた HTTPS をアプリに渡します。
+
+> **確認状況**
+> - アプリ: 利用者の Mac で、本物の GitHub とサブスクの Claude Code を使い「依頼 → 計画 → 実装 → AI レビュー → GitHub に Draft PR」まで動作を確認済み（`PAW_CLAUDE_CODE_RESTRICTED=0`）。GitHub からの Webhook 受信（Issue からの自動起動・レビューでの修正・マージでの完了）は、モックを使ったテストまでで、本物では未確認です。
+> - Tailscale: コマンドは Tailscale の CLI のソースコード（ヘルプ文）で確認した範囲です。公式ドキュメント（tailscale.com）には作成時に接続できず、インストール手順や Funnel の有効化の画面は未確認です。表示が手順と違う場合は、画面の案内を優先してください。
 
 ## 必要なもの
 
 | もの | 理由 |
 |---|---|
 | AWS アカウント | EC2 1 台 |
-| **ドメイン**（例 `paw.example.com`） | GitHub の Webhook と画面を HTTPS で受けるため（証明書は Caddy が Let's Encrypt から自動取得） |
-| GitHub アカウント | GitHub App を作ってリポジトリにインストールする |
+| Tailscale アカウント（無料の個人プランで可） | HTTPS の公開 URL（Funnel）を作る。GitHub アカウントでサインアップできる |
+| GitHub App | ローカルで試した App を使い回せます（手順 5） |
 | Claude のサブスク（Pro 以上） | `claude setup-token` でサーバー用のトークンを作る |
 
-## 1. EC2 を作る
+---
 
-| 項目 | 推奨 |
+## 1. EC2 を作る（AWS コンソール）
+
+AWS コンソール右上のリージョンを **東京（ap-northeast-1）** にして、**EC2 → インスタンスを起動** を開きます。
+
+| 項目 | 設定 |
 |---|---|
-| OS | Ubuntu Server 24.04 LTS |
-| インスタンスタイプ | メモリ 4GB 以上（Claude Code の公式要件）。例: `t4g.medium`（ARM）/ `t3.medium`（x86） |
-| ストレージ | 30GB 以上（リポジトリのクローンと作業コピー、テスト用の依存関係を置く） |
-| セキュリティグループ | 443・80: どこからでも（GitHub の Webhook と証明書の取得）。22: 自分の IP だけ（または SSM Session Manager を使い 22 は閉じる） |
-| Elastic IP | 割り当てて、ドメインの A レコードをこの IP に向ける |
+| 名前 | `paw` |
+| AMI | **Ubuntu Server 24.04 LTS**、アーキテクチャ **64 ビット (Arm)** |
+| インスタンスタイプ | **t4g.medium**（メモリ 4GB。Claude Code の公式要件が 4GB 以上） |
+| キーペア | **新しいキーペアを作成**（名前 `paw`、RSA、.pem）。ダウンロードされた `paw.pem` を保存 |
+| ネットワーク設定 | **SSH トラフィックを許可: 自分の IP**。HTTP・HTTPS のチェックは**入れない** |
+| ストレージ | **30 GiB**（gp3） |
 
-テストコマンド（例: `pnpm test`）もこのサーバーで動くため、重いテストがあるリポジトリはメモリに余裕を持たせてください。
+**インスタンスを起動** を押し、インスタンス一覧で状態が「実行中」になったら **パブリック IPv4 アドレス** を控えます。
+料金はインスタンスタイプとストレージで決まります。AWS の料金ページで確認してください。
 
-## 2. サーバーの準備
+## 2. SSH で入る（手元の Mac）
 
-SSH でログインし、以下を順に実行します。
+```bash
+mv ~/Downloads/paw.pem ~/.ssh/paw.pem && chmod 400 ~/.ssh/paw.pem
+```
+
+`<パブリック IP>` を置き換えて:
+
+```bash
+ssh -i ~/.ssh/paw.pem ubuntu@<パブリック IP>
+```
+
+以降の手順 3〜4 はサーバー上で実行します。
+
+## 3. サーバーの準備（サーバー上）
 
 ```bash
 sudo apt update && sudo apt install -y git curl ca-certificates
@@ -61,9 +83,7 @@ pnpm（リポジトリの `packageManager` に書かれた版を corepack が使
 sudo corepack enable
 ```
 
-Caddy（HTTPS のリバースプロキシ）は公式の手順でインストールしてください: https://caddyserver.com/docs/install#debian-ubuntu-raspbian
-
-アプリを動かす専用ユーザーとデータ置き場:
+アプリを動かす専用ユーザーと、データ・設定の置き場所:
 
 ```bash
 sudo useradd -m -s /bin/bash paw
@@ -73,31 +93,25 @@ sudo useradd -m -s /bin/bash paw
 sudo mkdir -p /var/lib/paw /etc/paw && sudo chown paw:paw /var/lib/paw && sudo chmod 700 /var/lib/paw
 ```
 
-## 3. アプリと Claude Code を入れる（paw ユーザーで）
+アプリと Claude Code を `paw` ユーザーで入れます:
 
 ```bash
 sudo -iu paw
 ```
 
-Claude Code（公式のインストーラー。`~/.local/bin/claude` に入る）:
-
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash
 ```
 
-アプリ本体（リポジトリが非公開の場合は、デプロイキーなどで取得してください）:
-
 ```bash
-git clone https://github.com/Toshipy/agents-office.git
-```
-
-```bash
-cd agents-office && git checkout claude/intelligent-keller-3gj7mv
+git clone https://github.com/Toshipy/agents-office.git && cd agents-office
 ```
 
 ```bash
 pnpm install --frozen-lockfile
 ```
+
+初回は pnpm のダウンロードの確認が出ることがあります。その場合は `Y` で進めてください。
 
 ```bash
 pnpm --filter @paw/web build
@@ -107,72 +121,85 @@ pnpm --filter @paw/web build
 exit
 ```
 
-## 4. GitHub App を作る（ローカルで作った App を使い回す場合は 4' へ）
+## 4. Tailscale Funnel で HTTPS の URL を作る（サーバー上）
 
-自分のアカウントの **Settings → Developer settings → GitHub Apps → New GitHub App**（https://github.com/settings/apps/new）で作成します。リポジトリの Settings ではありません。
-
-| 項目 | 値 |
-|---|---|
-| GitHub App name | 任意（例: `toshipy-ai-workspace`） |
-| Homepage URL | `https://paw.example.com` |
-| Webhook URL | `https://paw.example.com/integrations/github/webhook` |
-| Webhook secret | 下のコマンドで作った値（後で `PAW_GITHUB_WEBHOOK_SECRET` にも同じ値を入れる） |
-| Repository permissions | **Contents: Read and write**（ブランチの push）/ **Pull requests: Read and write**（Draft PR の作成）/ **Issues: Read-only**（Issue の内容）/ Metadata: Read-only（必須） |
-| Subscribe to events | **Issues** / **Pull request** / **Pull request review** |
-| Where can this GitHub App be installed? | **Only on this account** |
+Tailscale を入れます（Tailscale が案内している Linux 用のインストールスクリプト）:
 
 ```bash
-openssl rand -hex 32
+curl -fsSL https://tailscale.com/install.sh | sh
 ```
 
-作成後:
-1. 画面に出る **App ID** を控える。
-2. **Generate a private key** で秘密鍵（.pem）をダウンロードし、サーバーの `/etc/paw/github-app.pem` に置く。手元の PC から送る例（ファイル名・ホスト名は置き換える）:
+サーバーを自分の Tailscale につなぎます。表示される URL をブラウザで開いてログインしてください。`--hostname=paw` で URL の先頭が `paw` になります:
 
 ```bash
-scp ~/Downloads/your-app.private-key.pem ubuntu@paw.example.com:/tmp/github-app.pem
+sudo tailscale up --hostname=paw
 ```
 
-サーバー側で:
+アプリ（127.0.0.1:8787）をインターネットに公開します（`--bg` でバックグラウンドに常駐し、再起動後も設定が残ります）:
 
 ```bash
-sudo mv /tmp/github-app.pem /etc/paw/github-app.pem && sudo chown root:paw /etc/paw/github-app.pem && sudo chmod 640 /etc/paw/github-app.pem
+sudo tailscale funnel --bg 8787
 ```
 
-3. **Install App** から、AI に作業させたいリポジトリだけを選んでインストールする。
+初めて使うときは、Funnel や HTTPS 証明書をこの tailnet で有効にするよう求められることがあります。表示されたリンクを開いて有効にし、もう一度同じコマンドを実行してください。
 
-このアプリにはマージを行う処理がなく、Tool Broker でも常に拒否します。ただし上の権限（Contents / Pull requests の書き込み）は GitHub の仕組み上マージも可能な権限なので、念のため対象リポジトリの既定ブランチに**ブランチ保護（PR とレビュー必須）**を設定しておくことをおすすめします。
+公開 URL を確認します（`https://paw.<tailnet名>.ts.net` のような URL が表示されます。以降 `<公開 URL>` と書きます）:
 
-## 4'. ローカルで試した App を使い回す場合
+```bash
+tailscale funnel status
+```
 
-https://github.com/settings/apps で App の **Edit** を開き、次を変更します。
+アプリはまだ起動していないので、この時点で URL を開くとエラーになるのは正常です。
 
-1. **General → Webhook**: **Active** にチェック、Webhook URL に `https://paw.example.com/integrations/github/webhook`、Webhook secret に `openssl rand -hex 32` で作った値（`PAW_GITHUB_WEBHOOK_SECRET` と同じ値）を入れて保存。
-2. **Permissions & events → Subscribe to events**: **Issues** / **Pull request** / **Pull request review** にチェックして保存。
-3. **General → Private keys → Generate a private key**: サーバー用に**新しい鍵**を作る（手元の PC の鍵とは分けておくと、片方だけ無効にできる）。
-4. App ID は変わりません（**General → About** の App ID。インストール画面の URL の数字ではありません）。
+**鍵の有効期限を切る:** Tailscale の端末の鍵には有効期限があり（既定は 180 日だったはず。未確認）、切れるとサーバーが Tailscale から外れて Funnel も止まります。Tailscale の管理画面（https://login.tailscale.com/admin/machines）で `paw` の「…」メニューから **Disable key expiry** を選んでおいてください。
 
-Webhook を有効にすると GitHub からの通知はサーバーに届くようになります。手元の PC からの push と Draft PR 作成はそのまま使えます。
+## 5. GitHub App の設定を変える（ブラウザ）
 
-## 5. サブスクのトークンを作る（手元の PC で）
+ローカルで作った App を使い回します。https://github.com/settings/apps で App の **Edit** を開きます。
+
+1. **General → Webhook**
+   - **Active** にチェック
+   - Webhook URL: `<公開 URL>/integrations/github/webhook`
+   - Webhook secret: 手元の Mac で `openssl rand -hex 32` を実行して作った値（手順 7 の `PAW_GITHUB_WEBHOOK_SECRET` にも同じ値を入れる）
+   - **Save changes**
+2. **Permissions & events → Subscribe to events**: **Issues** / **Pull request** / **Pull request review** にチェックして **Save changes**
+3. **General → Private keys → Generate a private key**: サーバー用に**新しい鍵**を作ります（手元の Mac の鍵と分けておくと、片方だけ無効にできます）
+4. App ID は変わりません（**General → About** の App ID）
+
+## 6. 秘密鍵とサブスクのトークンを用意する（手元の Mac）
+
+ダウンロードされた新しい秘密鍵をサーバーへ送ります（ファイル名は実際のものに置き換える）:
+
+```bash
+scp -i ~/.ssh/paw.pem ~/Downloads/*.private-key.pem ubuntu@<パブリック IP>:/tmp/github-app.pem
+```
+
+サーバー用のサブスクのトークンを作ります。ブラウザで承認すると、1 年間有効なトークンが表示されます（どこにも保存されないので、次の手順で貼り付けます）:
 
 ```bash
 claude setup-token
 ```
 
-ブラウザで承認すると、1 年間有効なトークンが表示されます（どこにも保存されません）。次の設定ファイルに貼り付けます。
-このトークンは Claude のサブスクを使える鍵なので、他の人に見せたり Git にコミットしたりしないでください。
+このトークンと秘密鍵は、他の人に見せたり Git にコミットしたりしないでください。
 
-## 6. 設定ファイル
+## 7. 設定ファイル（サーバー上）
 
-`deploy/aws/paw.env.example` を `/etc/paw/paw.env` にコピーして値を埋めます。
+秘密鍵を置きます:
 
 ```bash
-sudo cp /home/paw/agents-office/deploy/aws/paw.env.example /etc/paw/paw.env
+sudo mv /tmp/github-app.pem /etc/paw/github-app.pem && sudo chown root:paw /etc/paw/github-app.pem && sudo chmod 640 /etc/paw/github-app.pem
 ```
 
+設定ファイルを作ります:
+
 ```bash
-sudo chown root:paw /etc/paw/paw.env && sudo chmod 640 /etc/paw/paw.env
+sudo cp /home/paw/agents-office/deploy/aws/paw.env.example /etc/paw/paw.env && sudo chown root:paw /etc/paw/paw.env && sudo chmod 640 /etc/paw/paw.env
+```
+
+セッション用の鍵を作り、表示された値を控えます:
+
+```bash
+openssl rand -hex 32
 ```
 
 ```bash
@@ -181,14 +208,34 @@ sudo nano /etc/paw/paw.env
 
 | 変数 | 入れる値 |
 |---|---|
-| `PAW_PUBLIC_URL` | `https://paw.example.com` |
-| `PAW_SESSION_SECRET` | `openssl rand -hex 32` の出力 |
-| `CLAUDE_CODE_OAUTH_TOKEN` | 手順 5 のトークン |
-| `PAW_GITHUB_APP_ID` | 手順 4 の App ID |
-| `PAW_GITHUB_WEBHOOK_SECRET` | 手順 4 で App に設定した Webhook secret と同じ値 |
-| `PAW_GITHUB_ALLOWED_USERS` | 自分の GitHub ユーザー名（この人の Issue・レビューだけを受け付ける） |
+| `PAW_PUBLIC_URL` | `<公開 URL>`（`https://paw.….ts.net`。末尾の `/` は付けない） |
+| `PAW_SESSION_SECRET` | 上で作った値 |
+| `PAW_SIGNUP_CODE` | `openssl rand -hex 16` で作った値（手順 10 の新規登録で入力する） |
+| `CLAUDE_CODE_OAUTH_TOKEN` | 手順 6 のトークン |
+| `PAW_GITHUB_APP_ID` | App ID |
+| `PAW_GITHUB_WEBHOOK_SECRET` | 手順 5 で App に設定した Webhook secret と同じ値 |
+| `PAW_GITHUB_ALLOWED_USERS` | `Toshipy`（この人の Issue・レビューだけを受け付ける） |
 
-## 7. 起動
+nano は Ctrl+O → Enter で保存、Ctrl+X で終了です。
+
+## 8. Claude Code の動作確認（サーバー上）
+
+サーバー用のトークンで Claude Code が動くかを確認します（`ok` と返れば OK。利用枠はほとんど使いません）:
+
+```bash
+sudo -H -u paw bash -c 'set -a; . /etc/paw/paw.env; set +a; cd /tmp && ~/.local/bin/claude -p "ok とだけ返して"'
+```
+
+続けて、制限モード（`--restricted`）でも動くかを確認します:
+
+```bash
+sudo -H -u paw bash -c 'set -a; . /etc/paw/paw.env; set +a; cd /tmp && ~/.local/bin/claude -p "ok とだけ返して" --restricted'
+```
+
+- 認証エラーになる → `/etc/paw/paw.env` の `PAW_CLAUDE_CODE_RESTRICTED=0` のまま（手元の Mac ではこの設定で動作確認済み）
+- `ok` と返る → `1` にすると、Claude Code が利用者・リポジトリの設定を読まない、より制限の強い起動になります
+
+## 9. 起動する（サーバー上）
 
 ```bash
 sudo cp /home/paw/agents-office/deploy/aws/paw.service /etc/systemd/system/paw.service
@@ -198,68 +245,78 @@ sudo cp /home/paw/agents-office/deploy/aws/paw.service /etc/systemd/system/paw.s
 sudo systemctl daemon-reload && sudo systemctl enable --now paw
 ```
 
-```bash
-sudo cp /home/paw/agents-office/deploy/aws/Caddyfile /etc/caddy/Caddyfile
-```
-
-`/etc/caddy/Caddyfile` の `paw.example.com` を自分のドメインに書き換えてから:
-
-```bash
-sudo systemctl reload caddy
-```
-
-Claude Code がサーバーのトークンで動くかを先に確認します（`ok` と返れば OK。利用枠はほとんど使いません）:
-
-```bash
-sudo -u paw bash -c 'set -a; . /etc/paw/paw.env; set +a; cd /tmp && ~/.local/bin/claude -p "ok とだけ返して"'
-```
-
-続けて、アプリが使う制限モード（`--restricted`）でも動くかを確認します:
-
-```bash
-sudo -u paw bash -c 'set -a; . /etc/paw/paw.env; set +a; cd /tmp && ~/.local/bin/claude -p "ok とだけ返して" --restricted'
-```
-
-認証エラーになる場合は `/etc/paw/paw.env` の `PAW_CLAUDE_CODE_RESTRICTED=0` のままにします（手元の PC では、この設定で動作を確認済み）。`ok` と返る場合は `1` にすると、Claude Code が利用者・リポジトリの設定を読まない、より制限の強い起動になります。
-
-起動の確認（`agent runtime` に `claude_code`、`github app` に App ID が出ていれば OK）:
+起動の確認（`agent runtime` に `claude_code`、`github app` に App ID、最後に `api listening` が出ていれば OK）:
 
 ```bash
 sudo journalctl -u paw -n 50 --no-pager
 ```
 
-## 8. 使い始める
+## 10. 使い始める（ブラウザ）
 
-1. `https://paw.example.com` を開き、**新規登録**で自分のアカウントを作る（2 人目以降は登録できません）。
-2. **設定 → AI 実行基盤** に「Claude Code（サブスク）」、ログインが「OAuth トークン（サブスク）」と出ることを確認。
-3. **Projects** で Project を作り、Repo 欄に GitHub App をインストールしたリポジトリ（候補が出ます）を入れて接続。必要ならテストコマンドを保存。
-4. 自動起動ルールを **ON**（ラベルは既定で `ai:ready`）。
-5. GitHub でそのリポジトリに Issue を作り、`ai:ready` ラベルを付ける → オフィスで Run が動き始め、終わると GitHub に Draft PR ができます。
-6. GitHub で PR をレビュー:
-   - **Request changes**: コメントの内容で AI が同じ PR を修正
-   - **Approve**: Run は完了
-   - **マージ**: 人が行う（マージすると Run は完了、マージせずに閉じると中止）
+1. 起動したらすぐに `<公開 URL>` を開き、**新規登録**で自分のアカウントを作る。**登録コード**には `PAW_SIGNUP_CODE` の値を入れる（2 人目以降は登録できません）。パスワードは長めのものにしてください
+2. **設定 → AI 実行基盤** に「Claude Code（サブスク）」、ログインが「OAuth トークン（サブスク）」と出ることを確認
+3. **Projects** で Project を作り、Repo に `Toshipy/agents-office` を接続
+4. **自動起動ルール** を **ON**（ラベルは `ai:ready`）
+
+GitHub App の設定画面の **Advanced → Recent Deliveries** で、GitHub からの通知が届いたか（応答コード 202 など）を確認できます。
+
+## 11. Issue から自動起動を試す
+
+1. https://github.com/Toshipy/agents-office/issues/new で Issue を作る
+   - タイトル例: `README の起動方法に pnpm のバージョン確認を追加`
+   - 本文例: `「起動方法」の node -v の下に pnpm -v を追加してください。変更は README.md だけ。`
+   - 右側の **Labels** で `ai:ready` を付ける（ラベルが無ければ、その場で作成できます）
+2. `<公開 URL>` のオフィスで Run が始まるのを確認
+3. 終わると Draft PR ができます。GitHub で PR を開いて:
+   - **Request changes**（コメントで指示）→ AI が同じ PR を修正
+   - **Approve** → Run は完了
+   - **マージ** は人が行います（マージすると Run は完了、マージせずに閉じると中止）
+
+このリポジトリの既定ブランチは `claude/intelligent-keller-3gj7mv` なので、AI の PR はこのブランチ向けになります。
+
+## うまくいかないとき
+
+| 症状 | 確かめること |
+|---|---|
+| `<公開 URL>` が開けない | `sudo systemctl status paw`（アプリ）と `tailscale funnel status`（Funnel）。Funnel の有効化が終わっているか |
+| Issue を作っても Run が始まらない | App の **Advanced → Recent Deliveries** の応答コード。401 は Webhook secret の不一致、届いていなければ Webhook URL の誤り。202 なのに始まらない場合は、Projects の自動起動 ON・ラベル名・`PAW_GITHUB_ALLOWED_USERS` を確認 |
+| Run が `CLAUDE_AUTH_ERROR` | 手順 8 の確認コマンドで原因を切り分け。トークンを作り直して `/etc/paw/paw.env` を更新し `sudo systemctl restart paw` |
+| Run が `GITHUB_AUTH_ERROR` | App の権限（Contents / Pull requests の Read and write）と、サーバーの秘密鍵が同じ App のものか |
+
+ログ:
+
+```bash
+sudo journalctl -u paw -f
+```
 
 ## 運用
 
 | こと | 方法 |
 |---|---|
-| ログ | `sudo journalctl -u paw -f` |
-| アプリの更新 | `sudo -iu paw` → `cd agents-office && git pull && pnpm install --frozen-lockfile && pnpm --filter @paw/web build` → `sudo systemctl restart paw` |
+| アプリの更新 | `sudo -iu paw` → `cd agents-office && git pull && pnpm install --frozen-lockfile && pnpm --filter @paw/web build` → `exit` → `sudo systemctl restart paw` |
+| 止める・再開 | `sudo systemctl stop paw` / `sudo systemctl start paw`。EC2 自体を止めると料金は下がりますが、その間は Issue に反応しません |
+| 公開をやめる | `sudo tailscale funnel reset` |
 | バックアップ | `/var/lib/paw`（DB・成果物）。EBS のスナップショットでも可 |
-| トークンの更新 | `claude setup-token` のトークンは 1 年有効。期限前に作り直して `/etc/paw/paw.env` を更新し、`sudo systemctl restart paw` |
+| トークンの更新 | `claude setup-token` のトークンは 1 年有効。期限前に作り直して `/etc/paw/paw.env` を更新し `sudo systemctl restart paw` |
 | 利用上限 | サブスクの利用枠は claude.ai のチャットと共有。上限に達すると Run は一時停止し、画面の「承認」から続行できます |
 
 ## 安全のための設定（このアプリ側で行っていること）
 
 - 公開リポジトリでも、`PAW_GITHUB_ALLOWED_USERS` 以外の人の Issue・レビューでは AI は動きません。
+- 画面はインターネットから開けますが、ログインが必要です。新規登録は最初の 1 人だけで、登録コード（`PAW_SIGNUP_CODE`）も必要です（`ts.net` の名前は証明書の公開ログなどから見つかる可能性があるため）。
 - GitHub のトークンは必要時に発行する 1 時間ほどのもので、メモリにだけ保持します。git には askpass 経由で渡し、コマンド引数・remote URL・設定ファイルに残しません。Claude Code にも渡しません。
 - push は `ai/` で始まるブランチだけ・強制 push なし・git フック無効。PR は Draft のみ。マージ・Secrets・ブランチ保護の操作は常に拒否します。
-- Claude Code はシェルを使えない制限モードで動き、ファイル操作は Run 専用の作業コピーの中だけです。CI 設定・git フック・`.claude/` などへの変更は取り込みません。
+- GitHub App の権限（Contents / Pull requests の書き込み）は GitHub の仕組み上マージも可能な権限なので、対象リポジトリの既定ブランチに**ブランチ保護（PR とレビュー必須）**を設定しておくと安全です。
+- Claude Code はシェルを使えない設定で動き、ファイル操作は Run 専用の作業コピーの中だけです。CI 設定・git フック・`.claude/` などへの変更は取り込みません。
 - テストコマンドはサーバー上でそのまま実行されます（コンテナ隔離は未実装）。信頼できるリポジトリにだけ設定してください。
 
-## 分かっていない・確認が必要なこと
+---
 
-- **Draft PR とプラン:** GitHub のプランとリポジトリの公開設定によっては、Draft PR が作れない場合があります（GitHub Free の非公開リポジトリなど）。その場合 Run は `GITHUB_REJECTED` で止まります（GitHub の正確な条件は未確認です）。
-- **ドメインがない場合:** この手順はドメインがある前提です。ない場合は別の方法（Cloudflare Tunnel や Tailscale Funnel など）が必要で、手順は未作成です。
-- **`--restricted` モード:** 手元の PC では「ログインし直し」と「`PAW_CLAUDE_CODE_RESTRICTED=0`」を同時に行って動いたため、制限モード自体がサブスクで動くかは切り分けられていません。手順 7 の確認コマンドで判断してください。`0` の場合も、リポジトリ側の設定（hooks・`.mcp.json`）は読まず、シェルも渡しません。サーバーの `paw` ユーザーには個人の Claude Code 設定が無いので、手元の PC より影響は小さくなります。
+## 付録: ドメインがある場合（Caddy で HTTPS）
+
+Tailscale Funnel の代わりに Caddy を使う場合:
+
+- セキュリティグループで 80・443 を開け、Elastic IP をドメインの A レコードに向ける
+- Caddy を公式の手順でインストール: https://caddyserver.com/docs/install#debian-ubuntu-raspbian
+- `deploy/aws/Caddyfile` を `/etc/caddy/Caddyfile` にコピーし、`paw.example.com` を自分のドメインに書き換えて `sudo systemctl reload caddy`
+- `PAW_PUBLIC_URL` と GitHub App の Webhook URL をそのドメインにする

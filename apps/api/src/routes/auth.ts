@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { LoginRequest, SignupRequest } from '@paw/contracts';
 import type { AppEnv, Services } from '../app';
 import { users, workspaces } from '../db/schema';
-import { verifyPassword } from '../lib/crypto';
+import { safeEqual, verifyPassword } from '../lib/crypto';
 import { AppError } from '../lib/errors';
 import { checkLoginRate, clearSession, issueSession, resetLoginRate } from '../auth/session';
 import { audit } from '../services/audit';
@@ -25,6 +25,7 @@ export function registerAuthRoutes(app: Hono<AppEnv>, s: Services) {
       mode: s.config.publicUrl ? 'server' : 'local',
       devRoutes: s.config.enableDevRoutes,
       signup: await signupAllowed(),
+      signupCodeRequired: Boolean(s.config.signupCode),
       devAccounts: s.config.enableDevRoutes && s.config.seedDemo ? DEMO_ACCOUNTS.map(({ username, password, displayName }) => ({ username, password, displayName })) : [],
     }),
   );
@@ -52,6 +53,9 @@ export function registerAuthRoutes(app: Hono<AppEnv>, s: Services) {
   app.post('/v1/auth/signup', async (c) => {
     const body = await parseBody(c, SignupRequest);
     if (!(await signupAllowed())) throw new AppError(403, 'SIGNUP_DISABLED', '新規登録は無効です（このサーバーは所有者専用です）');
+    if (s.config.signupCode && !safeEqual(body.signupCode ?? '', s.config.signupCode)) {
+      throw new AppError(403, 'SIGNUP_CODE_INVALID', '登録コードが違います（サーバーの設定ファイルの PAW_SIGNUP_CODE）');
+    }
     const { userId, workspace } = await createUserWithWorkspace(s.db, {
       username: body.username.toLowerCase(),
       displayName: body.displayName,

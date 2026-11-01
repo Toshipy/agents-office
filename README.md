@@ -8,7 +8,7 @@
 > Project にローカルの git リポジトリを指定すると、Claude が Run ごとの専用ブランチで計画 → 実装 → テスト → レビュー → Draft PR を進めます（「Claude で実行する」）。
 > どちらも無い場合や、ローカルリポジトリを指定していない Project はシミュレーションで動きます。
 >
-> **PC を閉じていても動かしたい場合**は、AWS の EC2 1 台で常時起動し、GitHub App で実際のリポジトリとつなげます（Issue にラベル → AI が作業 → Draft PR）。手順は [deploy/aws/README.md](deploy/aws/README.md) にあります。
+> **PC を閉じていても動かしたい場合**は、AWS の EC2 1 台で常時起動し、GitHub App で実際のリポジトリとつなげます（Issue にラベル → AI が作業 → Draft PR）。ドメインが無くても Tailscale Funnel で HTTPS の URL を用意できます。手順は [deploy/aws/README.md](deploy/aws/README.md) にあります。
 
 Agents Office のソースコード・3D モデル・固有デザイン・名称は使っていません（要求定義書 1.3 / ADR-015）。
 3D のキャラクター・机・島・ハブ・アイコンはすべてこのリポジトリ内のコードで作った独自のものです。
@@ -211,6 +211,7 @@ PAW_AGENT_RUNTIME=claude pnpm dev
 | `PAW_GITHUB_ALLOWED_USERS` | Issue・レビューを受け付ける GitHub ユーザー（カンマ区切り） |
 | `PAW_PUBLIC_URL` | 公開 URL（HTTPS なら Cookie に Secure を付け、Origin を許可） |
 | `PAW_SIGNUP` | `open`（既定）/ `first_user`（最初の 1 人だけ）/ `closed` |
+| `PAW_SIGNUP_CODE` | 設定すると、新規登録にこのコードが必要（公開 URL で他人に先に登録されないように） |
 | `PAW_SERVE_WEB` | `1` で API からビルド済みの画面も配信 |
 
 ### ブラウザだけで動くデモ

@@ -48,6 +48,8 @@ export interface AppConfig {
   cookieSecure: boolean;
   /** 新規登録: open = 誰でも / first_user = 最初の 1 人だけ / closed = 不可 */
   signup: 'open' | 'first_user' | 'closed';
+  /** 設定すると、新規登録にこのコードが必要（公開 URL で第三者に先に登録されないようにする） */
+  signupCode: string | null;
 }
 
 /**
@@ -228,6 +230,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     publicUrl,
     cookieSecure: publicUrl?.startsWith('https://') ?? false,
     signup: parseSignup(process.env.PAW_SIGNUP),
+    signupCode: nonEmpty(process.env.PAW_SIGNUP_CODE) ?? null,
     ...overrides,
   };
 }

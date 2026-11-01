@@ -197,6 +197,8 @@ export const SignupRequest = z.object({
     .regex(/^[a-z0-9_-]+$/, '英小文字・数字・_・- のみ使用できます'),
   displayName: z.string().trim().min(1).max(40),
   password: z.string().min(8).max(200),
+  /** サーバーで PAW_SIGNUP_CODE を設定している場合の登録コード */
+  signupCode: z.string().trim().max(200).optional(),
 });
 
 export const CreateRunRequest = z.object({

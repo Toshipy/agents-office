@@ -14,6 +14,7 @@ export function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
+  const [signupCode, setSignupCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -22,7 +23,7 @@ export function LoginPage() {
     setBusy(true);
     setError(null);
     try {
-      if (mode === 'signup' && !override) await api.post('/v1/auth/signup', { username, password, displayName });
+      if (mode === 'signup' && !override) await api.post('/v1/auth/signup', { username, password, displayName, ...(signupCode.trim() ? { signupCode: signupCode.trim() } : {}) });
       else await api.post('/v1/auth/login', override ?? { username, password });
       await qc.invalidateQueries({ queryKey: ['me'] });
     } catch (err) {
@@ -73,6 +74,12 @@ export function LoginPage() {
           <label>
             表示名
             <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} required />
+          </label>
+        ) : null}
+        {mode === 'signup' && cfg.data?.signupCodeRequired ? (
+          <label>
+            登録コード
+            <input value={signupCode} onChange={(e) => setSignupCode(e.target.value)} autoComplete="off" required className="mono" />
           </label>
         ) : null}
         <label>

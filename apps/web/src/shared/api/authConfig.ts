@@ -6,6 +6,8 @@ export interface AuthConfig {
   devRoutes: boolean;
   /** 新規登録できるか（サーバーでは最初の 1 人だけ等） */
   signup?: boolean;
+  /** 新規登録に登録コードが必要か */
+  signupCodeRequired?: boolean;
   devAccounts: { username: string; password: string; displayName: string }[];
 }
 
