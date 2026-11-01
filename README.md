@@ -20,6 +20,10 @@ Agents Office のソースコード・3D モデル・固有デザイン・名称
 必要なもの: **Node.js 22.13 以上**、**pnpm 10**
 
 ```bash
+node -v
+```
+
+```bash
 pnpm install
 ```
 
