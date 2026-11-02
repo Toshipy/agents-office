@@ -337,7 +337,8 @@ describe('publish 承認（GitHub への書き込みの前の人の承認）', {
     expect(String(ap!.payload.diffSha256)).toMatch(/^[0-9a-f]{64}$/);
     // 承認カードが開く差分は、承認する差分と同じ中身の成果物
     const diffArts = (await s.db.select().from(artifacts).where(eq(artifacts.runId, runId))).filter((x) => x.kind === 'diff');
-    expect(ap!.payload.diffArtifactId).toBe(diffArts.find((x) => x.checksum === `sha256:${ap!.payload.diffSha256}`)?.id);
+    // implement の差分と publish の差分が同じ中身で 2 件になりうる。どちらでも、結び付くのは同じ中身の成果物
+    expect(diffArts.filter((x) => x.checksum === `sha256:${ap!.payload.diffSha256}`).map((x) => x.id)).toContain(ap!.payload.diffArtifactId);
     expect(ap!.payload.diffArtifactId).toEqual(expect.any(String));
     expect(String(ap!.payload.body)).toContain('この PR は agents-office が作りました。マージは人が行います。');
     // 画面からの指示の Run（Issue なし）は Closes 行を付けない

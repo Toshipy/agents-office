@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { defaultClaudeCodeConfig, loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
-import { approvals, runSteps, runs, webhookDeliveries } from './db/schema';
+import { approvals, artifacts, runSteps, runs, webhookDeliveries } from './db/schema';
 import { signGithubPayload } from './github/webhook';
 import { installFakeClaude } from './testing/fakeClaude';
 import { decidePublish, pendingPublish, waitStatusApprovingWith } from './testing/publishApproval';
@@ -637,6 +637,12 @@ describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_0
     expect(fake.counts().review).toBe(reviewsBefore + 1);
     // 作り直した AI レビューは動いた HEAD を見ている
     expect(fake.calls().filter((c) => c.purpose === 'review').at(-1)!.stdin).toContain('late.txt');
+    // 作り直した承認にも、承認する差分の成果物が結び付く（人が差分を見ずに承認できないように）
+    const diffArtifactId = (second.payload as { diffArtifactId: string | null }).diffArtifactId;
+    expect(diffArtifactId).not.toBeNull();
+    const [diffRow] = await s.db.select().from(artifacts).where(eq(artifacts.id, diffArtifactId!));
+    expect(diffRow.kind).toBe('diff');
+    expect(await s.store.read(diffRow)).toContain('late.txt');
 
     // 作り直した承認を承認すると、その HEAD を push して PR を作る
     await decidePublish(s.db, req, created.id);

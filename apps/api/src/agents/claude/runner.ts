@@ -450,6 +450,8 @@ export class ClaudeRunner implements AgentRunner {
   /** 今の worktree（HEAD・base からの差分）から、publish 承認で人に見せる PR の中身を作る */
   private async publishPreview(ctx: StepExecutionContext, wt: Worktree, reviewSummary: string): Promise<PublishPreview> {
     const diff = await diffFromBase(wt, wt.baseSha);
+    // 承認で人に見せる差分そのもの（ハッシュを取る patch）を成果物に残す。implement を通らず HEAD が動いた場合でも、承認カードで差分を開けるようにする
+    await ctx.artifact('diff', '差分（承認する内容）', 'publish.diff', 'text/x-diff', diff.patch);
     return {
       headSha: await headSha(wt),
       diffSha256: sha256Hex(diff.patch),
