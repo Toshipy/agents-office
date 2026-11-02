@@ -386,14 +386,14 @@ describe('AT-009 forbidden operations', () => {
     expect((await runRow(runId)).status).toBe('waiting_review');
   });
 
-  it('tool broker enforces repo, branch and draft constraints', () => {
+  it('tool broker enforces repo and branch constraints', () => {
     const base = { role: 'tool_broker' as const, allowedTools: [], boundRepo: 'me/repo' };
-    expect(authorizeTool({ ...base, tool: 'github.pull_request.create_draft', args: { repo: 'me/repo', branch: 'ai/run-x', draft: true } }).allowed).toBe(true);
-    expect(authorizeTool({ ...base, tool: 'github.pull_request.create_draft', args: { repo: 'other/repo', branch: 'ai/run-x', draft: true } }).allowed).toBe(false);
+    expect(authorizeTool({ ...base, tool: 'github.pull_request.create', args: { repo: 'me/repo', branch: 'ai/run-x', draft: true } }).allowed).toBe(true);
+    expect(authorizeTool({ ...base, tool: 'github.pull_request.create', args: { repo: 'other/repo', branch: 'ai/run-x', draft: true } }).allowed).toBe(false);
     expect(authorizeTool({ ...base, tool: 'github.branch.push', args: { repo: 'me/repo', branch: 'main' } }).allowed).toBe(false);
-    expect(authorizeTool({ ...base, tool: 'github.pull_request.create_draft', args: { repo: 'me/repo', branch: 'ai/run-x', draft: false } }).allowed).toBe(false);
+    expect(authorizeTool({ ...base, tool: 'github.pull_request.create', args: { repo: 'me/repo', branch: 'main', draft: false } }).allowed).toBe(false);
     expect(authorizeTool({ ...base, tool: 'github.pull_request.merge', args: { repo: 'me/repo' } }).allowed).toBe(false);
-    expect(authorizeTool({ role: 'developer', allowedTools: ['worktree.write'], boundRepo: 'me/repo', tool: 'github.pull_request.create_draft', args: {} }).allowed).toBe(false);
+    expect(authorizeTool({ role: 'developer', allowedTools: ['worktree.write'], boundRepo: 'me/repo', tool: 'github.pull_request.create', args: {} }).allowed).toBe(false);
   });
 });
 

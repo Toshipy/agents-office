@@ -353,11 +353,10 @@ export class ClaudeRunner implements AgentRunner {
     const remote = ctx.remote;
     const push = await ctx.tool('github.branch.push', { repo: ctx.repo, branch: ctx.branch }, `ブランチを確定: ${ctx.branch}${remote ? '（GitHub に push）' : '（ローカル）'}`);
     if (!push.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${push.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
-    // toolBroker の方針が draft: true を要求するため、承認用の引数はそのまま（実際の GitHub PR は通常の PR で作る）
-    const tool = update ? 'github.pull_request.update' : 'github.pull_request.create_draft';
+    const tool = update ? 'github.pull_request.update' : 'github.pull_request.create';
     const res = await ctx.tool(
       tool,
-      { repo: ctx.repo, branch: ctx.branch, base: remote?.defaultBranch ?? 'main', draft: true },
+      { repo: ctx.repo, branch: ctx.branch, base: remote?.defaultBranch ?? 'main', draft: false },
       update ? `PR #${ctx.pr!.number} を更新` : `PR を作成${remote ? '（GitHub）' : '（ローカル）'}`,
     );
     if (!res.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${res.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };

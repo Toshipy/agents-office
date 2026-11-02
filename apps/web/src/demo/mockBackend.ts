@@ -377,7 +377,7 @@ class DemoServer {
         lines.push(['tool', 'diff.read — 差分を取得'], ['tool', 'ci.read — テスト結果を確認'], ['log', '受入条件との照合中…'], ['tool', 'review.write — 指摘: blocker 0 / nit 2']);
         break;
       default:
-        lines.push(['tool', `github.branch.push — ブランチを push: ${c.branch}`], ['tool', st.key === 'update_pr' ? `github.pull_request.update — Draft PR #${run.pr?.number} を更新` : 'github.pull_request.create_draft — Draft PR を作成（base: main）']);
+        lines.push(['tool', `github.branch.push — ブランチを push: ${c.branch}`], ['tool', st.key === 'update_pr' ? `github.pull_request.update — Draft PR #${run.pr?.number} を更新` : 'github.pull_request.create — Draft PR を作成（base: main）']);
     }
     return lines.map(([kind, message], i) => ({ at: ((i + 0.6) / (lines.length + 0.4)) * st.duration, kind, message }));
   }

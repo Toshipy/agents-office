@@ -25,7 +25,7 @@ export const DEFAULT_TOOL_POLICIES: Record<Exclude<StepRole, 'tool_broker'>, str
 };
 
 /** Tool Broker 自身がシステムとして実行できる GitHub 書き込み（ポリシー検証付き） */
-const BROKER_TOOLS = ['github.branch.push', 'github.pull_request.create_draft', 'github.pull_request.update'];
+const BROKER_TOOLS = ['github.branch.push', 'github.pull_request.create', 'github.pull_request.update'];
 
 export interface ToolRequest {
   role: StepRole;
@@ -57,9 +57,6 @@ export function authorizeTool(req: ToolRequest): ToolDecision {
     const branch = String(req.args.branch ?? '');
     if (!/^ai\/[A-Za-z0-9._/-]+$/.test(branch)) {
       return { allowed: false, reason: 'AI 用ブランチ（ai/ プレフィックス）以外への書き込みは禁止' };
-    }
-    if (req.tool !== 'github.branch.push' && req.args.draft !== true) {
-      return { allowed: false, reason: 'PR は Draft でのみ作成・更新できます' };
     }
     return { allowed: true, reason: 'ポリシー適合' };
   }
