@@ -19,6 +19,10 @@ type Run = typeof runs.$inferSelect;
 export class GithubPoller {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private current: Promise<void> | null = null;
+  private warnedNoLogin = false;
+  /** Issue ごとの最後に見た updatedAt。変わっていなければ events API（lastLabeled）を呼ばない */
+  private readonly seenUpdatedAt = new Map<string, string>();
 
   /**
    * @param login 自分の GitHub ログイン名。null なら（誰の Issue か決められないので）Issue からは Run を作らない。
@@ -37,21 +41,29 @@ export class GithubPoller {
     void this.pollOnce();
   }
 
-  stop(): void {
+  /** 止める。進行中のポーリングがあれば終わるまで待つ */
+  async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    await this.current?.catch(() => undefined);
   }
 
   /** 1 回分の取り込み。Repo ごとの失敗は記録して次へ進む。多重実行はしない */
   async pollOnce(): Promise<void> {
     if (this.running) return;
     this.running = true;
-    try {
-      await this.pollIssues();
-      await this.pollPulls();
-    } finally {
-      this.running = false;
-    }
+    this.current = (async () => {
+      try {
+        await this.pollIssues();
+        await this.pollPulls();
+      } catch (err) {
+        // DB の失敗などで、定期実行がプロセスを落とさないようにする
+        log.error('github poll failed', { err: String(err) });
+      } finally {
+        this.running = false;
+      }
+    })();
+    await this.current;
   }
 
   private async enqueue(
@@ -77,13 +89,15 @@ export class GithubPoller {
 
   private async pollIssues(): Promise<void> {
     if (this.login === null) {
-      log.warn('GitHub のログイン名が未設定のため、ポーリングでは Issue から Run を作りません');
+      if (!this.warnedNoLogin) log.warn('GitHub のログイン名が未設定のため、ポーリングでは Issue から Run を作りません');
+      this.warnedNoLogin = true;
       return;
     }
     const bindings = await this.db
       .select()
       .from(repositoryBindings)
-      .where(and(eq(repositoryBindings.automationEnabled, true), eq(repositoryBindings.verification, 'github_app')));
+      .where(and(eq(repositoryBindings.automationEnabled, true), eq(repositoryBindings.verification, 'github_app')))
+      .orderBy(repositoryBindings.createdAt, repositoryBindings.id);
     for (const b of bindings) {
       try {
         const label = b.policy.triggerLabel;
@@ -96,8 +110,21 @@ export class GithubPoller {
             .from(runs)
             .where(and(eq(runs.workspaceId, b.workspaceId), eq(runs.issueKey, issueKey), sql`${runs.status} not in (${sql.join(TERMINAL_RUN_STATUSES.map((s) => sql`${s}`), sql`, `)})`));
           if (active.length > 0) continue;
+          const memoKey = `${b.repositoryId}#${issue.number}`;
+          if (this.seenUpdatedAt.get(memoKey) === issue.updatedAt) continue;
           const labeled = await this.github.lastLabeled(b.installationId, b.fullName, issue.number, label);
           if (!labeled) continue;
+          // ラベルを付けた後に作られた Run が（終端でも）あれば、その付与は処理済み。deliveryId が表に無くても
+          // （Webhook 時代の Run や .data の作り直し）二重に Run を作らない。付け直せば labeled.at が新しくなり、新しい Run になる
+          const handled = await this.db
+            .select({ id: runs.id })
+            .from(runs)
+            .where(and(eq(runs.workspaceId, b.workspaceId), eq(runs.issueKey, issueKey), sql`${runs.createdAt} >= ${new Date(labeled.at)}`))
+            .limit(1);
+          if (handled.length > 0) {
+            this.seenUpdatedAt.set(memoKey, issue.updatedAt);
+            continue;
+          }
           await this.enqueue(b, `poll:issue:${b.repositoryId}:${issue.number}:${labeled.at}`, 'issues', 'labeled', {
             action: 'labeled',
             label: { name: label },
@@ -113,6 +140,7 @@ export class GithubPoller {
             installation: { id: b.installationId },
             sender: { login: labeled.login },
           });
+          this.seenUpdatedAt.set(memoKey, issue.updatedAt);
         }
       } catch (err) {
         log.error('github poll (issues) failed', { repo: b.fullName, err: String(err) });
@@ -148,7 +176,7 @@ export class GithubPoller {
     const pull = await this.github.getPull(b.installationId, b.fullName, pr.number);
     const repo = { repository: { id: b.repositoryId, full_name: b.fullName }, installation: { id: b.installationId } };
     if (pull.state === 'closed') {
-      await this.enqueue(b, `poll:pr:${b.repositoryId}:${pr.number}:closed`, 'pull_request', 'closed', {
+      await this.enqueue(b, `poll:pr:${b.repositoryId}:${pr.number}:closed:${run.id}`, 'pull_request', 'closed', {
         action: 'closed',
         pull_request: { number: pr.number, merged: pull.merged, head: { sha: pull.headSha } },
         ...repo,

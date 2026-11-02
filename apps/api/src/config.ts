@@ -90,7 +90,7 @@ function loadGithubApp(): AppConfig['githubApp'] {
 
 function parsePollMs(v: string | undefined): number {
   const n = Number(v);
-  return Number.isFinite(n) && n >= 1000 ? Math.floor(n) : 60_000;
+  return Number.isFinite(n) && n >= 10_000 ? Math.floor(n) : 60_000;
 }
 
 function parseSignup(v: string | undefined): AppConfig['signup'] {

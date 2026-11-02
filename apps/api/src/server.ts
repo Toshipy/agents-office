@@ -45,7 +45,7 @@ async function main() {
     shuttingDown = true;
     log.info('shutting down', { signal });
     demo.stop();
-    services.poller?.stop();
+    await services.poller?.stop();
     services.dispatcher.stop();
     services.seats.stop();
     await services.engine.stop();
