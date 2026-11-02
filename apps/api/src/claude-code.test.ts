@@ -5,7 +5,7 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { and, eq } from 'drizzle-orm';
@@ -170,7 +170,8 @@ describe('Claude Code (subscription) runtime — fake CLI', () => {
       expect(settings.permissions.blockReadsOutsideWorkingDirectories).toBe(true);
       expect(settings.permissions.deny).toEqual(expect.arrayContaining(['Edit(.github/workflows/**)', 'Edit(.claude/**)', 'Read(.env)']));
       // 作業は Run 専用の worktree で行う
-      expect(c.cwd.startsWith(join(dataRoot, 'worktrees'))).toBe(true);
+      // macOS は /var が /private/var の実体パスになるため、両辺を実体パスにしてから比べる
+      expect(realpathSync(c.cwd).startsWith(realpathSync(join(dataRoot, 'worktrees')))).toBe(true);
       // 依頼本文は標準入力（非信頼入力として囲む）
       expect(c.stdin).toContain('<untrusted_request>');
       // API キーや親の Claude Code セッションの環境変数は渡さない（渡すと API 課金になる）
