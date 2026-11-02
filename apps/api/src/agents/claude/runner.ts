@@ -18,9 +18,10 @@ import { existsSync } from 'node:fs';
 import { PATTERNS, detectDangerous } from '@paw/sim-content';
 import type { AgentRunner, StepExecutionContext, StepOutput } from '../runner';
 import { RunnerError } from '../runner';
-import { assertGitLink, changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, run, safeEnv, worktreeExists, type Worktree } from './git';
+import { assertGitLink, changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, worktreeExists, type Worktree } from './git';
 import type { RemoteRepoHost } from '../../github/repoHost';
 import type { ModelBackend } from './shared';
+import type { TestSandbox } from './testSandbox';
 import { DEVELOPER_SYSTEM, PLANNER_SYSTEM, PlanOutput, REVIEWER_SYSTEM, ReviewOutput, bullet } from './shared';
 
 const MAX_DIFF_FOR_REVIEW = 200 * 1024;
@@ -28,6 +29,8 @@ const MAX_DIFF_FOR_REVIEW = 200 * 1024;
 export interface ClaudeRunnerOptions {
   worktreesDir: string;
   testTimeoutMs: number;
+  /** Tester の実行場所（サーバーモードは Docker コンテナ） */
+  testSandbox: TestSandbox;
   backend: ModelBackend;
   /** GitHub App 連携（管理クローンの取得・push・PR）。未設定ならローカルリポジトリのみ */
   remoteHost?: RemoteRepoHost | null;
@@ -269,7 +272,14 @@ export class ClaudeRunner implements AgentRunner {
         results.push({ command: c, exitCode: -1, timedOut: false, output: decision.reason });
         break;
       }
-      const r = await run(bin, args, { cwd: worktree, timeoutMs: this.opts.testTimeoutMs, signal: ctx.signal, env: safeEnv({ CI: '1' }) });
+      const r = await this.opts.testSandbox.exec(bin, args, {
+        worktree,
+        timeoutMs: this.opts.testTimeoutMs,
+        signal: ctx.signal,
+        image: ctx.localRepo?.testImage ?? null,
+        runId: ctx.runId,
+        attempt: ctx.attempt,
+      });
       const output = `${r.stdout}\n${r.stderr}`.trim();
       results.push({ command: c, exitCode: r.code, timedOut: r.timedOut, output: output.slice(-20_000) });
       await ctx.log(`${r.code === 0 ? '✓' : '✗'} ${c}（exit ${r.code}${r.timedOut ? '・タイムアウト' : ''}）`, r.code === 0 ? 'log' : 'error');

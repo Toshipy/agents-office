@@ -8,6 +8,7 @@ const safe = {
   seedDemo: false,
   enableDevRoutes: false,
   agentRuntime: 'claude_code',
+  testSandbox: 'docker',
   claudeCode: { restricted: true, detected: { supportsRestricted: true } },
 };
 
@@ -26,6 +27,7 @@ describe('assertSafeServerConfig', () => {
     [{ signup: 'open' }, 'PAW_SIGNUP'],
     [{ seedDemo: true }, 'PAW_SEED_DEMO'],
     [{ enableDevRoutes: true }, 'PAW_DEV_ROUTES'],
+    [{ testSandbox: 'host' }, 'PAW_TEST_SANDBOX'],
     [{ claudeCode: { restricted: false, detected: { supportsRestricted: true } } }, 'PAW_CLAUDE_CODE_RESTRICTED'],
     [{ claudeCode: { restricted: true, detected: { supportsRestricted: false } } }, '--restricted'],
   ])('%o は起動を拒む', (patch, word) => expect(() => assertSafeServerConfig(cfg({ ...safe, ...patch }))).toThrow(word));

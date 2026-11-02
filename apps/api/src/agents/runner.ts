@@ -33,7 +33,7 @@ export interface StepExecutionContext {
   /** この Run の実行基盤（Run 作成時に確定） */
   runtime: AgentRuntime;
   /** Project に設定されたローカル git リポジトリ（Claude 実行時に使用。GitHub 連携時はサーバー上の管理クローン） */
-  localRepo: { path: string; testCommand: string | null } | null;
+  localRepo: { path: string; testCommand: string | null; testImage: string | null } | null;
   /** GitHub App で接続したリポジトリ（push と Draft PR 作成に使う）。ローカル / シミュレーターの Repo は null */
   remote: RemoteRepo | null;
   /** GitHub Issue から起動した Run の Issue 番号 */

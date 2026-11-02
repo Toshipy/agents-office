@@ -112,6 +112,8 @@ export const repositoryBindings = pgTable(
     localPath: text('local_path'),
     /** Tester が worktree で実行するコマンド（利用者が明示的に設定したものだけ実行） */
     testCommand: text('test_command'),
+    /** Tester のコンテナイメージ（null なら PAW_TEST_IMAGE の既定） */
+    testImage: text('test_image'),
     nextPrNumber: integer('next_pr_number').notNull().default(1),
     nextIssueNumber: integer('next_issue_number').notNull().default(1),
     createdAt: ts('created_at').notNull().defaultNow(),

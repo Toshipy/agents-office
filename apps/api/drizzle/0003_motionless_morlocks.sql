@@ -1,0 +1,1 @@
+ALTER TABLE "repository_bindings" ADD COLUMN "test_image" text;

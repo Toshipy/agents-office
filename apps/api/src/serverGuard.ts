@@ -14,6 +14,7 @@ export function assertSafeServerConfig(config: AppConfig): void {
     if (!config.claudeCode.restricted) problems.push('PAW_CLAUDE_CODE_RESTRICTED=0 は使えません（1 にしてください）');
     if (!config.claudeCode.detected?.supportsRestricted) problems.push('Claude Code CLI が --restricted に対応していません（`claude update` で更新してください）');
   }
+  if (config.testSandbox === 'host') problems.push('PAW_TEST_SANDBOX=host は使えません（docker にしてください。テストコードが秘密を読めてしまいます）');
   if (problems.length > 0) {
     throw new Error(`サーバーモードの設定が安全ではないため起動を中止します:\n${problems.map((p) => `- ${p}`).join('\n')}`);
   }

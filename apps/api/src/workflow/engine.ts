@@ -638,7 +638,7 @@ export class WorkflowEngine {
       previous: prepared.previous,
       pr: run.pr ? { number: run.pr.number, url: run.pr.url, branch: run.pr.branch, headSha: run.pr.headSha } : null,
       runtime: run.runtime,
-      localRepo: binding?.localPath ? { path: binding.localPath, testCommand: binding.testCommand } : null,
+      localRepo: binding?.localPath ? { path: binding.localPath, testCommand: binding.testCommand, testImage: binding.testImage } : null,
       remote:
         binding && binding.verification === 'github_app' && binding.cloneUrl && binding.defaultBranch
           ? {

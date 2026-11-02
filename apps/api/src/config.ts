@@ -41,6 +41,12 @@ export interface AppConfig {
   claudeStepTimeoutMs: number;
   worktreesDir: string;
   testTimeoutMs: number;
+  /** Tester の実行場所。docker = 使い捨てコンテナ（サーバーモードの既定）/ host = ホストで直接（ローカルの既定） */
+  testSandbox: 'docker' | 'host';
+  /** Repo 別のイメージ指定が無いときに使うイメージ */
+  testImage: string;
+  /** Tester のコンテナを繋ぐ docker ネットワーク */
+  testNetwork: string;
   /** GitHub App 連携（未設定ならローカルの GitHub シミュレーターのみ） */
   githubApp: { appId: string; privateKeyPem: string; apiUrl: string; allowedUsers: string[] } | null;
   /** サーバーで公開する URL（例 https://paw.example.com）。Cookie の Secure・許可 Origin に使う */
@@ -78,6 +84,13 @@ function loadGithubApp(): AppConfig['githubApp'] {
 function parseSignup(v: string | undefined): AppConfig['signup'] {
   const m = (v ?? 'open').trim().toLowerCase().replace('-', '_');
   return m === 'first_user' || m === 'closed' ? m : 'open';
+}
+
+/** 未指定ならサーバーモード（publicUrl あり）は docker、ローカルは host */
+function parseTestSandbox(v: string | undefined, publicUrl: string | null): AppConfig['testSandbox'] {
+  const m = (v ?? '').trim().toLowerCase();
+  if (m === 'docker' || m === 'host') return m;
+  return publicUrl ? 'docker' : 'host';
 }
 
 export interface ClaudeCodeConfig {
@@ -226,6 +239,9 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     claudeStepTimeoutMs: positiveInt(process.env.PAW_CLAUDE_STEP_TIMEOUT_MS, 30 * 60_000),
     worktreesDir: resolve(root, 'worktrees'),
     testTimeoutMs: Number(process.env.PAW_TEST_TIMEOUT_MS ?? 600_000),
+    testSandbox: parseTestSandbox(process.env.PAW_TEST_SANDBOX, publicUrl),
+    testImage: nonEmpty(process.env.PAW_TEST_IMAGE) ?? 'node:22-bookworm',
+    testNetwork: nonEmpty(process.env.PAW_TEST_NETWORK) ?? 'paw-test',
     githubApp: isMemory ? null : loadGithubApp(),
     publicUrl,
     cookieSecure: publicUrl?.startsWith('https://') ?? false,

@@ -19,6 +19,7 @@ import { SimulatedRunner } from './agents/simulated';
 import type { AgentRunner } from './agents/runner';
 import { RunnerRouter } from './agents/router';
 import { ClaudeRunner } from './agents/claude/runner';
+import { DockerSandbox, HostSandbox, type TestSandbox } from './agents/claude/testSandbox';
 import { ClaudeApiBackend, type ClaudeMessagesClient } from './agents/claude/apiBackend';
 import { ClaudeCodeBackend } from './agents/claude/cliBackend';
 import { removeWorktree } from './agents/claude/git';
@@ -66,7 +67,8 @@ export async function createServices(
     log.warn('PAW_GITHUB_ALLOWED_USERS が未設定のため、GitHub の Issue・レビューからは Run を起動しません');
   }
   const remoteHost = github ? new GithubRepoHost(github, config.dataRoot) : null;
-  const common = { worktreesDir: config.worktreesDir, testTimeoutMs: config.testTimeoutMs, remoteHost };
+  const testSandbox: TestSandbox = config.testSandbox === 'docker' ? new DockerSandbox({ network: config.testNetwork, defaultImage: config.testImage }) : new HostSandbox();
+  const common = { worktreesDir: config.worktreesDir, testTimeoutMs: config.testTimeoutMs, testSandbox, remoteHost };
   const runner =
     opts.runner ??
     new RunnerRouter(
