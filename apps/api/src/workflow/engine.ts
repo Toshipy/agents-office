@@ -87,6 +87,8 @@ interface Inflight {
   controller: AbortController;
   runId: string;
   cancelled: boolean;
+  /** 工程の実行（終了処理を含む）が済んだら解決する。中止・片付けはこれを待つ */
+  done: Promise<void>;
 }
 
 export function branchFor(runId: string): string {
@@ -263,9 +265,32 @@ export class WorkflowEngine {
     return this.config.agentRuntime !== 'simulated' && binding?.localPath ? this.config.agentRuntime : 'simulated';
   }
 
+  /** その Run の実行中工程を中止させる。待つのは呼び出し側（Run のロックの外で waitFlights する） */
+  private abortRunFlights(runId: string, reason: string): Inflight[] {
+    const flights: Inflight[] = [];
+    for (const f of this.inflight.values()) {
+      if (f.runId !== runId) continue;
+      f.cancelled = true;
+      f.controller.abort(new StepCancelledError(reason));
+      flights.push(f);
+    }
+    return flights;
+  }
+
+  /** 工程の終了を最長 15 秒待つ（Claude CLI は SIGINT 後もしばらく生きるため） */
+  private async waitFlights(flights: Inflight[]) {
+    if (flights.length === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    const limit = new Promise<void>((resolve) => (timer = setTimeout(resolve, 15_000)));
+    await Promise.race([Promise.all(flights.map((f) => f.done)), limit]);
+    clearTimeout(timer);
+  }
+
   private async cleanupRun(run: RunRow) {
     if (run.runtime === 'simulated' || !this.runner.onRunFinished) return;
     try {
+      // 実行中の工程（CLI プロセス）が終わる前に worktree を消さない
+      await this.waitFlights([...this.inflight.values()].filter((f) => f.runId === run.id));
       const [binding] = await this.db.select().from(repositoryBindings).where(eq(repositoryBindings.projectId, run.projectId));
       await this.runner.onRunFinished(run.id, binding?.localPath ?? null, branchFor(run.id));
     } catch (err) {
@@ -357,18 +382,14 @@ export class WorkflowEngine {
 
   /** 利用者による中止（FR-037）。実行中 Runner は AbortSignal で停止させる */
   async cancelRun(runId: string, reason: string): Promise<RunRow | null> {
-    return this.withRunLock(runId, async () => {
+    let flights: Inflight[] = [];
+    const row = await this.withRunLock(runId, async () => {
       const row = await this.transition(runId, 'cancelled', {
         errorCode: 'CANCELLED_BY_USER',
         errorMessage: reason,
       });
       if (!row) return null;
-      for (const f of this.inflight.values()) {
-        if (f.runId === runId) {
-          f.cancelled = true;
-          f.controller.abort(new StepCancelledError(reason));
-        }
-      }
+      flights = this.abortRunFlights(runId, reason);
       await this.db
         .update(runSteps)
         .set({ status: 'cancelled', finishedAt: new Date() })
@@ -376,6 +397,9 @@ export class WorkflowEngine {
       await this.supersedePendingApprovals(runId);
       return row;
     });
+    // 工程側の終了処理も Run のロックを取るため、待つのはロックの外
+    await this.waitFlights(flights);
+    return row;
   }
 
   /* ------------------------------------------------------------ */
@@ -463,7 +487,9 @@ export class WorkflowEngine {
       .where(and(eq(runSteps.id, stepId), eq(runSteps.status, 'pending')))
       .returning();
     if (!claimed) return;
-    const flight: Inflight = { controller, runId: claimed.runId, cancelled: false };
+    let markDone!: () => void;
+    const done = new Promise<void>((resolve) => (markDone = resolve));
+    const flight: Inflight = { controller, runId: claimed.runId, cancelled: false, done };
     this.inflight.set(stepId, flight);
     let timeout: NodeJS.Timeout | undefined;
     try {
@@ -496,6 +522,7 @@ export class WorkflowEngine {
     } finally {
       clearTimeout(timeout);
       this.inflight.delete(stepId);
+      markDone();
     }
   }
 
@@ -975,11 +1002,13 @@ export class WorkflowEngine {
     });
   }
 
-  /** GitHub で PR が人の手でマージされた: レビュー待ちなら承認済み → 完了にする */
+  /** GitHub で PR が人の手でマージされた: 終端でない状態なら、実行中の工程を止めて承認済み → 完了にする */
   async completeMergedRun(runId: string): Promise<RunRow | null> {
-    return this.withRunLock(runId, async () => {
+    let flights: Inflight[] = [];
+    const result = await this.withRunLock(runId, async () => {
       const [run] = await this.db.select().from(runs).where(eq(runs.id, runId));
-      if (!run || run.status !== 'waiting_review') return null;
+      if (!run || TERMINAL_RUN_STATUSES.includes(run.status)) return null;
+      flights = this.abortRunFlights(runId, 'PR がマージされました');
       const decided = await this.db
         .update(approvals)
         .set({ status: 'approved', version: sql`${approvals.version} + 1`, decidedBy: 'github:merged', decidedAt: new Date(), decisionComment: 'PR がマージされました' })
@@ -988,9 +1017,18 @@ export class WorkflowEngine {
       for (const a of decided) {
         await this.bus.emit(run.workspaceId, 'approval.resolved', { approvalId: a.id, status: a.status, decidedBy: a.decidedBy }, { runId, projectId: run.projectId });
       }
+      await this.db
+        .update(runSteps)
+        .set({ status: 'cancelled', finishedAt: new Date() })
+        .where(and(eq(runSteps.runId, runId), inArray(runSteps.status, ['pending', 'running', 'needs_input'])));
+      // pr_review 以外の未決（確認・利用上限の一時停止など）はマージで意味を失う
+      await this.supersedePendingApprovals(runId);
       const r = await this.transition(runId, 'approved');
       return r ? this.transition(runId, 'completed') : null;
     });
+    // 工程側の終了処理も Run のロックを取るため、待つのはロックの外
+    await this.waitFlights(flights);
+    return result;
   }
 
   /** needs_input からの再開（人の判断: 承認 / 差し戻し）。計画からやり直す */

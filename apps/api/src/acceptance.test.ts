@@ -7,6 +7,8 @@ import { loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
 import { auditLogs, runSteps, runs, stepLogs, webhookDeliveries, workspaces } from './db/schema';
 import { signGithubPayload } from './github/webhook';
+import { deliver } from './github/simulator';
+import { repositoryBindings } from './db/schema';
 import { WorkflowEngine } from './workflow/engine';
 import { SimulatedRunner } from './agents/simulated';
 import { authorizeTool } from './workflow/toolBroker';
@@ -208,6 +210,27 @@ describe('AT-006 / AT-007 Issue → Draft PR → review loop', () => {
 
     // approve → completed（自動マージはしない）
     await a.json('POST', '/v1/dev/github/simulate', { kind: 'review', runId, state: 'approved', body: 'LGTM' });
+    const done = await waitStatus(runId, 'completed');
+    expect(done.finishedAt).not.toBeNull();
+  });
+});
+
+describe('PR のマージはどの状態の Run も完了にする', () => {
+  it('validating の Run の PR がマージされたら completed になる', async () => {
+    const a = await signup('mergeany');
+    const { projectId } = await setupProject(a);
+    const runId = await createRun(a, projectId);
+    const waiting = await waitStatus(runId, 'waiting_review');
+    // PR は作られたが、まだ検証中という状態を作る
+    await s.db.update(runs).set({ status: 'validating' }).where(eq(runs.id, runId));
+    const [binding] = await s.db.select().from(repositoryBindings).where(eq(repositoryBindings.projectId, projectId));
+    await deliver(s.db, s.config, 'pull_request', {
+      action: 'closed',
+      pull_request: { number: waiting.pr!.number, merged: true, head: { sha: waiting.pr!.headSha, ref: waiting.pr!.branch } },
+      repository: { id: binding.repositoryId, full_name: binding.fullName },
+      installation: { id: binding.installationId },
+      sender: { login: 'octocat' },
+    });
     const done = await waitStatus(runId, 'completed');
     expect(done.finishedAt).not.toBeNull();
   });

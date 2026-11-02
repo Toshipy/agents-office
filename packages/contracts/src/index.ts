@@ -67,16 +67,18 @@ export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = [
  *  - waiting_review → needs_input は基本設計書 4.3「上限超過 → needs_input / escalated」に基づく
  *  - validating → needs_input / needs_input → running・validating は、Claude のサブスク利用上限で
  *    工程を一時停止し、人の「続行」でその工程から再開するための追加（利用者の要望による）
+ *  - 終端でない全状態 → approved は、PR が GitHub で人の手でマージされたとき、どの状態の Run も完了に
+ *    するための追加（レビュー待ちより前に PR が先にマージされても Run を取り残さない）
  */
 export const RUN_TRANSITIONS: Record<RunStatus, readonly RunStatus[]> = {
-  queued: ['planning', 'cancelled'],
-  planning: ['running', 'needs_input', 'failed', 'cancelled'],
-  running: ['validating', 'needs_input', 'failed', 'cancelled'],
-  validating: ['pr_ready', 'running', 'needs_input', 'failed', 'cancelled'],
-  pr_ready: ['waiting_review', 'failed', 'cancelled'],
+  queued: ['planning', 'approved', 'cancelled'],
+  planning: ['running', 'needs_input', 'failed', 'approved', 'cancelled'],
+  running: ['validating', 'needs_input', 'failed', 'approved', 'cancelled'],
+  validating: ['pr_ready', 'running', 'needs_input', 'failed', 'approved', 'cancelled'],
+  pr_ready: ['waiting_review', 'failed', 'approved', 'cancelled'],
   waiting_review: ['revising', 'approved', 'needs_input', 'cancelled'],
-  revising: ['running', 'failed', 'cancelled'],
-  needs_input: ['planning', 'running', 'validating', 'cancelled'],
+  revising: ['running', 'failed', 'approved', 'cancelled'],
+  needs_input: ['planning', 'running', 'validating', 'approved', 'cancelled'],
   approved: ['completed'],
   completed: [],
   failed: [],

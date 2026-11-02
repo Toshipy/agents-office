@@ -308,6 +308,26 @@ describe('Claude Code (subscription) runtime — fake CLI', () => {
   });
 });
 
+describe('Claude Code cancel waits for exit', () => {
+  it('CLI のプロセスが終わってから cancelRun が返る', async () => {
+    // SIGINT を受けても 1 秒生き続ける偽 CLI
+    setScenario({ plan: [{ kind: 'slow_exit', slowExitMs: 1000 }] });
+    const runId = await startRun();
+    await waitFor(async () => calls().length > 0);
+    const pid = calls()[0].pid;
+    await new Promise((r) => setTimeout(r, 200)); // SIGINT ハンドラの登録を待つ
+    const row = await s.engine.cancelRun(runId, 'test');
+    expect(row?.status).toBe('cancelled');
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      alive = (e as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+    expect(alive).toBe(false);
+  });
+});
+
 describe('Claude Code detection and errors', () => {
   const ctx = (signal = new AbortController().signal) =>
     ({
