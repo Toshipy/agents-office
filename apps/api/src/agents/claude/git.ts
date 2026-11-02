@@ -5,7 +5,8 @@
 import { execFile } from 'node:child_process';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { RunnerError } from '../runner';
 
 const SECRET_ENV = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|SESSION|COOKIE|AUTH)/i;
 
@@ -74,6 +75,19 @@ export interface Worktree {
   path: string;
   branch: string;
   baseSha: string;
+  /** `git rev-parse --absolute-git-dir` の値。AI が作業ツリーの .git を書き換えても、ここを明示して本物の git を見る */
+  gitDir: string;
+}
+
+/** worktree 向けの git の共通引数。作業ツリーの `.git` ファイルを信用せず、記録した gitDir を使う */
+function wtArgs(wt: Worktree | string, args: string[]): { cwd: string; args: string[] } {
+  if (typeof wt === 'string') return { cwd: wt, args };
+  return { cwd: wt.path, args: [`--git-dir=${wt.gitDir}`, `--work-tree=${wt.path}`, ...args] };
+}
+
+async function wtGit(wt: Worktree | string, args: string[], signal?: AbortSignal) {
+  const a = wtArgs(wt, args);
+  return git(a.cwd, a.args, signal);
 }
 
 export function worktreeExists(worktreesDir: string, runId: string) {
@@ -95,16 +109,43 @@ export async function ensureWorktree(
 ): Promise<Worktree> {
   const path = resolve(worktreesDir, runId);
   const baseFile = `${path}.base`;
-  if (existsSync(path) && existsSync(baseFile)) {
-    return { path, branch, baseSha: (await readFile(baseFile, 'utf8')).trim() };
+  const linkFile = `${path}.gitlink`;
+  const oldBase = existsSync(baseFile) ? (await readFile(baseFile, 'utf8')).trim() : '';
+  if (existsSync(path) && oldBase && existsSync(linkFile)) {
+    // 健全な worktree は再利用する（git が作業ツリーとして認識できることも確かめる）
+    const r = await run('git', ['-C', path, 'rev-parse', '--absolute-git-dir'], { cwd: path, timeoutMs: 10_000 });
+    if (r.code === 0 && r.stdout.trim()) return { path, branch, baseSha: oldBase, gitDir: r.stdout.trim() };
   }
+  // 作りかけ（.base / .gitlink が無い、git が壊れている）は片付けて作り直す
+  if (existsSync(path) || existsSync(baseFile) || existsSync(linkFile)) {
+    await run('git', ['worktree', 'remove', '--force', path], { cwd: repoPath, timeoutMs: 60_000 });
+    await rm(path, { recursive: true, force: true });
+    await rm(linkFile, { force: true });
+    await rm(baseFile, { force: true });
+  }
+  await run('git', ['worktree', 'prune'], { cwd: repoPath, timeoutMs: 30_000 });
   await mkdir(worktreesDir, { recursive: true });
-  const baseSha = (await git(repoPath, ['rev-parse', '--verify', `${baseRef}^{commit}`], signal)).trim();
+  // 作り直しでも起点は変えない（.base が読めればそれを使う）
+  const baseSha = oldBase || (await git(repoPath, ['rev-parse', '--verify', `${baseRef}^{commit}`], signal)).trim();
   const exists = await run('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoPath });
   if (exists.code === 0) await git(repoPath, ['worktree', 'add', path, branch], signal);
   else await git(repoPath, ['worktree', 'add', '-b', branch, path, baseSha], signal);
+  const gitDir = (await git(path, ['rev-parse', '--absolute-git-dir'], signal)).trim();
+  await writeFile(linkFile, await readFile(join(path, '.git'), 'utf8'), 'utf8');
   await writeFile(baseFile, baseSha, 'utf8');
-  return { path, branch, baseSha };
+  return { path, branch, baseSha, gitDir };
+}
+
+/**
+ * AI の工程の後に呼ぶ。作業ツリーの `.git` ファイルが作成時の中身と違えば、
+ * 以降の git 操作（フック・設定の読み込み）が別の場所に向けられ得るため中止する。
+ */
+export async function assertGitLink(wt: Worktree): Promise<void> {
+  const expected = existsSync(`${wt.path}.gitlink`) ? await readFile(`${wt.path}.gitlink`, 'utf8') : null;
+  const actual = await readFile(join(wt.path, '.git'), 'utf8').catch(() => null);
+  if (expected === null || actual !== expected) {
+    throw new RunnerError('作業ツリーの .git が書き換えられたため中止しました', 'GIT_LINK_TAMPERED', false);
+  }
 }
 
 /**
@@ -121,6 +162,7 @@ export async function removeWorktree(repoPath: string, worktreePath: string, bra
     if (count.code === 0 && count.stdout.trim() === '0') await run('git', ['branch', '-D', branch], { cwd: repoPath, timeoutMs: 30_000 });
   }
   await rm(baseFile, { force: true });
+  await rm(`${worktreePath}.gitlink`, { force: true });
 }
 
 export async function listFiles(worktree: string): Promise<string[]> {
@@ -134,20 +176,20 @@ export async function grep(worktree: string, query: string): Promise<string> {
 }
 
 /** 変更をコミットする。変更が無ければ null */
-export async function commitAll(worktree: string, message: string): Promise<string | null> {
-  await git(worktree, ['add', '-A']);
-  const status = await git(worktree, ['status', '--porcelain']);
+export async function commitAll(worktree: Worktree | string, message: string): Promise<string | null> {
+  await wtGit(worktree, ['add', '-A']);
+  const status = await wtGit(worktree, ['status', '--porcelain']);
   if (!status.trim()) return null;
-  await git(worktree, ['-c', 'user.name=Personal AI Workspace', '-c', 'user.email=agent@localhost', 'commit', '--no-verify', '-q', '-m', message]);
-  return (await git(worktree, ['rev-parse', 'HEAD'])).trim();
+  await wtGit(worktree, ['-c', 'user.name=Personal AI Workspace', '-c', 'user.email=agent@localhost', 'commit', '--no-verify', '-q', '-m', message]);
+  return (await wtGit(worktree, ['rev-parse', 'HEAD'])).trim();
 }
 
 /**
  * 作業ツリーで変更・追加・削除されたパス（コミット前）。リネームは新旧両方を返す。
  * Developer が外部プロセス（Claude Code）でファイルを編集した後の検証に使う。
  */
-export async function changedPaths(worktree: string): Promise<string[]> {
-  const out = await git(worktree, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames']);
+export async function changedPaths(worktree: Worktree | string): Promise<string[]> {
+  const out = await wtGit(worktree, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames']);
   const entries = out.split('\0').filter(Boolean);
   const paths: string[] = [];
   for (let i = 0; i < entries.length; i++) {
@@ -161,18 +203,18 @@ export async function changedPaths(worktree: string): Promise<string[]> {
 }
 
 /** コミットされていない変更をすべて破棄する（禁止パスの変更を検出したとき用） */
-export async function discardChanges(worktree: string) {
-  await git(worktree, ['reset', '--hard', '-q', 'HEAD']);
-  await git(worktree, ['clean', '-fdq']);
+export async function discardChanges(worktree: Worktree | string) {
+  await wtGit(worktree, ['reset', '--hard', '-q', 'HEAD']);
+  await wtGit(worktree, ['clean', '-fdq']);
 }
 
-export async function headSha(worktree: string): Promise<string> {
-  return (await git(worktree, ['rev-parse', 'HEAD'])).trim();
+export async function headSha(worktree: Worktree | string): Promise<string> {
+  return (await wtGit(worktree, ['rev-parse', 'HEAD'])).trim();
 }
 
-export async function diffFromBase(worktree: string, baseSha: string): Promise<{ patch: string; files: { path: string; additions: number; deletions: number }[] }> {
-  const patch = await git(worktree, ['diff', '--no-color', `${baseSha}..HEAD`]);
-  const numstat = await git(worktree, ['diff', '--numstat', `${baseSha}..HEAD`]);
+export async function diffFromBase(worktree: Worktree | string, baseSha: string): Promise<{ patch: string; files: { path: string; additions: number; deletions: number }[] }> {
+  const patch = await wtGit(worktree, ['diff', '--no-color', `${baseSha}..HEAD`]);
+  const numstat = await wtGit(worktree, ['diff', '--numstat', `${baseSha}..HEAD`]);
   const files = numstat
     .split('\n')
     .filter(Boolean)

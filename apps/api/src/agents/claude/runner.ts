@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 import { PATTERNS, detectDangerous } from '@paw/sim-content';
 import type { AgentRunner, StepExecutionContext, StepOutput } from '../runner';
 import { RunnerError } from '../runner';
-import { changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, run, safeEnv, worktreeExists } from './git';
+import { assertGitLink, changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, run, safeEnv, worktreeExists, type Worktree } from './git';
 import type { RemoteRepoHost } from '../../github/repoHost';
 import type { ModelBackend } from './shared';
 import { DEVELOPER_SYSTEM, PLANNER_SYSTEM, PlanOutput, REVIEWER_SYSTEM, ReviewOutput, bullet } from './shared';
@@ -65,14 +65,14 @@ export class ClaudeRunner implements AgentRunner {
       case 'plan':
         return this.plan(ctx, wt.path);
       case 'implement':
-        return this.implement(ctx, wt.path, wt.baseSha);
+        return this.implement(ctx, wt);
       case 'test':
         return this.test(ctx, wt.path);
       case 'review':
-        return this.review(ctx, wt.path, wt.baseSha);
+        return this.review(ctx, wt);
       case 'draft_pr':
       case 'update_pr':
-        return this.pullRequest(ctx, wt.path, wt.baseSha);
+        return this.pullRequest(ctx, wt);
     }
   }
 
@@ -189,7 +189,8 @@ export class ClaudeRunner implements AgentRunner {
     };
   }
 
-  private async implement(ctx: StepExecutionContext, worktree: string, baseSha: string): Promise<StepOutput> {
+  private async implement(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    const worktree = wt.path;
     await ctx.tool('worktree.write', { branch: ctx.branch }, `隔離 worktree で作業: ${ctx.branch}`);
     const detail = ctx.previous.planDetail as PlanOutput | undefined;
     const feedback = [
@@ -212,10 +213,12 @@ export class ClaudeRunner implements AgentRunner {
         .filter(Boolean)
         .join('\n\n'),
     });
-    await this.verifyChanges(ctx, worktree);
-    const sha = await commitAll(worktree, `${ctx.title}\n\nrun: ${ctx.runId} (revision ${ctx.revision})`);
+    // AI が作業ツリーの .git を書き換えていないことを確かめてから、git 操作に進む
+    await assertGitLink(wt);
+    await this.verifyChanges(ctx, wt);
+    const sha = await commitAll(wt, `${ctx.title}\n\nrun: ${ctx.runId} (revision ${ctx.revision})`);
     await ctx.log(sha ? `コミット作成: ${sha.slice(0, 7)} on ${ctx.branch}` : '変更はありませんでした', sha ? 'log' : 'error');
-    const diff = await diffFromBase(worktree, baseSha);
+    const diff = await diffFromBase(wt, wt.baseSha);
     const additions = diff.files.reduce((a, f) => a + f.additions, 0);
     const deletions = diff.files.reduce((a, f) => a + f.deletions, 0);
     await ctx.artifact('diff', `差分（revision ${ctx.revision}）`, 'changes.diff', 'text/x-diff', diff.patch || '# 変更なし\n');
@@ -231,15 +234,16 @@ export class ClaudeRunner implements AgentRunner {
    * Claude Code のように外部プロセスがファイルを書いた場合でも、CI 設定・git フック・秘密値・
    * AI エージェント設定・worktree 外を指すリンクへの変更は取り込まない。
    */
-  private async verifyChanges(ctx: StepExecutionContext, worktree: string) {
-    const paths = await changedPaths(worktree);
+  private async verifyChanges(ctx: StepExecutionContext, wt: Worktree) {
+    const worktree = wt.path;
+    const paths = await changedPaths(wt);
     const violations: string[] = [];
     for (const p of paths) {
       const c = confine(worktree, p);
       if (!c.ok) violations.push(`${p}（${c.reason}）`);
     }
     if (violations.length === 0) return;
-    await discardChanges(worktree);
+    await discardChanges(wt);
     await ctx.log(`禁止されたパスへの変更を検出したため、この試行の変更をすべて破棄しました: ${violations.slice(0, 5).join(' / ')}`, 'error');
     throw new RunnerError(`禁止されたパスへの変更を検出しました: ${violations.slice(0, 5).join(' / ')}`, 'FORBIDDEN_CHANGE', false);
   }
@@ -287,10 +291,11 @@ export class ClaudeRunner implements AgentRunner {
     };
   }
 
-  private async review(ctx: StepExecutionContext, worktree: string, baseSha: string): Promise<StepOutput> {
+  private async review(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    const worktree = wt.path;
     await ctx.tool('diff.read', {}, '差分を取得');
     await ctx.tool('ci.read', {}, 'テスト結果を確認');
-    const diff = await diffFromBase(worktree, baseSha);
+    const diff = await diffFromBase(wt, wt.baseSha);
     const truncated = diff.patch.length > MAX_DIFF_FOR_REVIEW;
     if (truncated) await ctx.log(`差分が大きいため先頭 ${MAX_DIFF_FOR_REVIEW / 1024}KB のみレビュー対象にします`, 'error');
     const detail = ctx.previous.planDetail as PlanOutput | undefined;
@@ -341,7 +346,8 @@ export class ClaudeRunner implements AgentRunner {
     };
   }
 
-  private async pullRequest(ctx: StepExecutionContext, worktree: string, baseSha: string): Promise<StepOutput> {
+  private async pullRequest(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    const worktree = wt.path;
     const update = ctx.key === 'update_pr' && ctx.pr !== null;
     const remote = ctx.remote;
     const push = await ctx.tool('github.branch.push', { repo: ctx.repo, branch: ctx.branch }, `ブランチを確定: ${ctx.branch}${remote ? '（GitHub に push）' : '（ローカル）'}`);
@@ -353,7 +359,7 @@ export class ClaudeRunner implements AgentRunner {
       update ? `Draft PR #${ctx.pr!.number} を更新` : `Draft PR を作成${remote ? '（GitHub）' : '（ローカル）'}`,
     );
     if (!res.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${res.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
-    const diff = await diffFromBase(worktree, baseSha);
+    const diff = await diffFromBase(wt, wt.baseSha);
     const testsSkipped = Boolean(ctx.previous.testsSkipped);
     const testsLine = testsSkipped ? '未実行（コマンド未設定）' : ctx.previous.testsPassed === false ? '✗ 失敗' : '✓ 通過';
     let pr: { number: number; url: string; branch: string; headSha: string; draft: true };
@@ -384,13 +390,13 @@ export class ClaudeRunner implements AgentRunner {
       pr = { number: published.number, url: published.url, branch: ctx.branch, headSha: published.headSha, draft: true };
     } else {
       const number = update ? ctx.pr!.number : await ctx.allocatePrNumber();
-      pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: await headSha(worktree), draft: true };
+      pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: await headSha(wt), draft: true };
     }
     const md = [
       `# ${update ? 'Draft PR 更新' : 'Draft PR 作成'} — #${pr.number}`,
       '',
       remote ? `- GitHub: ${pr.url}` : `- リポジトリ: \`${ctx.localRepo!.path}\``,
-      `- ブランチ: \`${ctx.branch}\`（base: \`${remote ? `${remote.defaultBranch} @ ` : ''}${baseSha.slice(0, 7)}\`）`,
+      `- ブランチ: \`${ctx.branch}\`（base: \`${remote ? `${remote.defaultBranch} @ ` : ''}${wt.baseSha.slice(0, 7)}\`）`,
       `- head: \`${pr.headSha.slice(0, 12)}\``,
       `- 変更: ${diff.files.length} ファイル`,
       `- テスト: ${testsLine}`,
