@@ -31,7 +31,8 @@ export interface RemoteRepoHost {
     ctx: StepExecutionContext,
     wt: Worktree,
     remote: RemoteRepo,
-    args: { branch: string; existing: { number: number; url: string } | null; title: string; body: string },
+    /** headSha は人が publish 承認で確かめたコミット。push するのはこのコミットだけ（worktree の HEAD ではない） */
+    args: { branch: string; headSha: string; existing: { number: number; url: string } | null; title: string; body: string },
   ): Promise<{ number: number; url: string; headSha: string }>;
   /** GitHub 上の ai/ ブランチに人が足したコミットを worktree へ取り込む。履歴が分岐していたら BRANCH_DIVERGED */
   syncBranch(ctx: StepExecutionContext, wt: Worktree, remote: RemoteRepo, branch: string): Promise<'up_to_date' | 'fast_forwarded'>;
@@ -123,14 +124,17 @@ export class GithubRepoHost implements RemoteRepoHost {
     ctx: StepExecutionContext,
     wt: Worktree,
     remote: RemoteRepo,
-    args: { branch: string; existing: { number: number; url: string } | null; title: string; body: string },
+    args: { branch: string; headSha: string; existing: { number: number; url: string } | null; title: string; body: string },
   ) {
     if (!/^ai\/[A-Za-z0-9._/-]+$/.test(args.branch)) throw new RunnerError('ai/ 以外のブランチには push しません', 'POLICY_DENIED', false);
+    // 承認した SHA だけを push する（参照名やオプションとして解釈される値は受け付けない）
+    if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(args.headSha)) throw new RunnerError('承認したコミットの SHA が不正です', 'POLICY_DENIED', false);
     const env = await this.gitEnv(remote.installationId);
     // 強制 push はしない（人が同じブランチに追加したコミットを消さない）
     // フックは実行しない（リポジトリ由来の設定でトークンを持つプロセスにコードを実行させない）
     // 作業ツリーの .git は信用せず記録した gitDir を使い、push 先も origin ではなく取得済みのクローン URL を明示する
-    const push = wtArgs(wt, ['push', '--quiet', '--no-verify', remote.cloneUrl, `HEAD:refs/heads/${args.branch}`]);
+    // push するのは worktree の HEAD ではなく承認したコミット（照合の後に HEAD が動いても、承認していない内容は出さない）
+    const push = wtArgs(wt, ['push', '--quiet', '--no-verify', remote.cloneUrl, `${args.headSha}:refs/heads/${args.branch}`]);
     const r = await run('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', ...push.args], {
       cwd: push.cwd,
       env,
@@ -138,7 +142,7 @@ export class GithubRepoHost implements RemoteRepoHost {
       signal: ctx.signal,
     });
     if (r.code !== 0) throw new RunnerError(`ブランチ ${args.branch} を push できません: ${r.stderr.trim().slice(-300)}`, 'GIT_PUSH_FAILED', false);
-    const sha = await headSha(wt);
+    const sha = args.headSha;
     await ctx.log(`GitHub に push: ${args.branch}（${sha.slice(0, 7)}）`);
     if (args.existing) return { number: args.existing.number, url: args.existing.url, headSha: sha };
     try {

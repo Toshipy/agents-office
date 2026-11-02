@@ -13,7 +13,7 @@ import { loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
 import { runSteps, runs, stepLogs, usageRecords } from './db/schema';
 import type { ClaudeMessagesClient } from './agents/claude/apiBackend';
-import { decidePublish } from './testing/publishApproval';
+import { waitStatusApprovingWith } from './testing/publishApproval';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-claude-'));
 const repo = join(tmp, 'repo');
@@ -123,13 +123,7 @@ async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, timeo
 const runRow = async (id: string) => (await s.db.select().from(runs).where(eq(runs.id, id)))[0];
 const waitStatus = (id: string, status: string) => waitFor(async () => ((await runRow(id)).status === status ? runRow(id) : null));
 /** publish 承認（GitHub への書き込みの前の人の承認）を承認しながら、指定の状態まで待つ */
-const waitStatusApproving = (id: string, status: string) =>
-  waitFor(async () => {
-    const r = await runRow(id);
-    if (r.status === status) return r;
-    if (r.status === 'needs_input') await decidePublish(s.db, req, id);
-    return null;
-  });
+const waitStatusApproving = (id: string, status: string) => waitStatusApprovingWith(s.db, req, waitFor, runRow)(id, status);
 
 let projectId = '';
 

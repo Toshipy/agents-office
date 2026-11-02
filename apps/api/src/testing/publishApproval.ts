@@ -4,7 +4,7 @@
  */
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../db/client';
-import { approvals } from '../db/schema';
+import { approvals, type runs } from '../db/schema';
 
 type Request = (method: string, path: string, body?: unknown) => Promise<{ status: number; body: any }>;
 
@@ -35,4 +35,25 @@ export async function decidePublish(
   });
   if (r.status !== 200) throw new Error(`publish の判断に失敗: ${r.status} ${JSON.stringify(r.body)}`);
   return ap;
+}
+
+type RunRow = typeof runs.$inferSelect;
+
+/**
+ * 「publish 承認を承認しながら、指定の状態まで待つ」関数を、各テストの waitFor / runRow で作る。
+ * needs_input でも publish 以外の承認（確認・利用上限など）は判断しない。
+ */
+export function waitStatusApprovingWith(
+  db: Db,
+  req: Request,
+  waitFor: (fn: () => Promise<RunRow | null>) => Promise<RunRow>,
+  runRow: (id: string) => Promise<RunRow>,
+) {
+  return (id: string, ...statuses: string[]) =>
+    waitFor(async () => {
+      const r = await runRow(id);
+      if (statuses.includes(r.status)) return r;
+      if (r.status === 'needs_input') await decidePublish(db, req, id);
+      return null;
+    });
 }

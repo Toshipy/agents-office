@@ -16,7 +16,7 @@ import { ClaudeCodeBackend } from './agents/claude/cliBackend';
 import { probeClaudeCode, resolveAgentRuntime } from './agents/claude/detect';
 import { RunnerError, type StepExecutionContext } from './agents/runner';
 import { FAKE_CLAUDE_CLI } from './testing/fakeClaude';
-import { decidePublish, pendingPublish } from './testing/publishApproval';
+import { decidePublish, pendingPublish, waitStatusApprovingWith } from './testing/publishApproval';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-cc-'));
 const repo = join(tmp, 'repo');
@@ -85,13 +85,7 @@ async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, timeo
 const runRow = async (id: string) => (await s.db.select().from(runs).where(eq(runs.id, id)))[0];
 const waitStatus = (id: string, ...status: string[]) => waitFor(async () => (status.includes((await runRow(id)).status) ? runRow(id) : null));
 /** publish 承認（GitHub への書き込みの前の人の承認）を承認しながら、指定の状態まで待つ */
-const waitStatusApproving = (id: string, ...status: string[]) =>
-  waitFor(async () => {
-    const r = await runRow(id);
-    if (status.includes(r.status)) return r;
-    if (r.status === 'needs_input') await decidePublish(s.db, req, id);
-    return null;
-  });
+const waitStatusApproving = (id: string, ...status: string[]) => waitStatusApprovingWith(s.db, req, waitFor, runRow)(id, ...status);
 
 async function startRun(request = 'greet の文言を Hello, world に変更して') {
   const created = await req('POST', '/v1/runs', { projectId, request });

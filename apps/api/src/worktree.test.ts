@@ -90,9 +90,31 @@ describe('worktree', () => {
     const host = new GithubRepoHost({ installationToken: async () => 't', findOpenPullByHead: async () => null, createPullRequest: async () => ({ number: 1, htmlUrl: 'u' }) } as never, join(tmp, 'data'));
     const ctx = { log: async () => undefined, signal: new AbortController().signal } as never;
     const remote = { provider: 'github', installationId: 1, repositoryId: 1, fullName: 'o/r', defaultBranch: 'main', cloneUrl: bare } as const;
-    const res = await host.publish(ctx, wt, remote, { branch: 'ai/run-h', existing: null, title: 't', body: 'b' });
+    const res = await host.publish(ctx, wt, remote, { branch: 'ai/run-h', headSha: wt.baseSha, existing: null, title: 't', body: 'b' });
     expect(res.headSha).toBe(wt.baseSha);
     expect(git(bare, 'rev-parse', 'refs/heads/ai/run-h').trim()).toBe(wt.baseSha);
+  });
+
+  it('publish は worktree の HEAD ではなく承認した SHA だけを push し、その SHA を返す', async () => {
+    const bare = join(tmp, 'remote-i.git');
+    execFileSync('git', ['init', '-q', '--bare', bare]);
+    const wt = await ensureWorktree(repo, wtDir, 'run_i', 'ai/run-i');
+    const approved = wt.baseSha;
+    // Runner の照合の後・push の前に HEAD が動いた状況（承認していないコミットが先頭にある）
+    writeFileSync(join(wt.path, 'unapproved.txt'), 'x\n');
+    git(wt.path, 'add', 'unapproved.txt');
+    git(wt.path, 'commit', '-q', '-m', 'unapproved');
+    const moved = (await headSha(wt));
+    expect(moved).not.toBe(approved);
+    const host = new GithubRepoHost({ installationToken: async () => 't', findOpenPullByHead: async () => null, createPullRequest: async () => ({ number: 1, htmlUrl: 'u' }) } as never, join(tmp, 'data'));
+    const ctx = { log: async () => undefined, signal: new AbortController().signal } as never;
+    const remote = { provider: 'github', installationId: 1, repositoryId: 1, fullName: 'o/r', defaultBranch: 'main', cloneUrl: bare } as const;
+    const res = await host.publish(ctx, wt, remote, { branch: 'ai/run-i', headSha: approved, existing: null, title: 't', body: 'b' });
+    expect(res.headSha).toBe(approved);
+    expect(git(bare, 'rev-parse', 'refs/heads/ai/run-i').trim()).toBe(approved);
+    expect(() => git(bare, 'cat-file', '-e', moved)).toThrow(); // 承認していないコミットは送られていない
+    // SHA 以外（参照名など）は push しない
+    await expect(host.publish(ctx, wt, remote, { branch: 'ai/run-i', headSha: 'HEAD', existing: null, title: 't', body: 'b' })).rejects.toMatchObject({ code: 'POLICY_DENIED' });
   });
 
   it('Tester の実行が .git を書き換えたら、テスト工程が GIT_LINK_TAMPERED で止まる', async () => {

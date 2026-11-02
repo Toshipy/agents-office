@@ -453,6 +453,8 @@ export class ClaudeRunner implements AgentRunner {
       // タイトル・本文は人が承認したものをそのまま使う
       const published = await this.opts.remoteHost!.publish(ctx, wt, remote, {
         branch: ctx.branch,
+        // 照合済みなので head は承認した SHA。push するのはこのコミットだけ
+        headSha: head,
         existing: update ? { number: ctx.pr!.number, url: ctx.pr!.url } : null,
         title: String(approved.title ?? ctx.title),
         body: String(approved.body ?? ''),

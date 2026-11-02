@@ -19,7 +19,7 @@ import { createApp, createServices, type Services } from './app';
 import { approvals, runSteps, runs, webhookDeliveries } from './db/schema';
 import { signGithubPayload } from './github/webhook';
 import { installFakeClaude } from './testing/fakeClaude';
-import { decidePublish, pendingPublish } from './testing/publishApproval';
+import { decidePublish, pendingPublish, waitStatusApprovingWith } from './testing/publishApproval';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-gh-'));
 const dataRoot = join(tmp, 'data');
@@ -261,13 +261,7 @@ async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, timeo
 const runRow = async (id: string) => (await s.db.select().from(runs).where(eq(runs.id, id)))[0];
 const waitStatus = (id: string, ...st: string[]) => waitFor(async () => (st.includes((await runRow(id)).status) ? runRow(id) : null));
 /** publish 承認（GitHub への書き込みの前の人の承認）を承認しながら、指定の状態まで待つ */
-const waitStatusApproving = (id: string, ...st: string[]) =>
-  waitFor(async () => {
-    const r = await runRow(id);
-    if (st.includes(r.status)) return r;
-    if (r.status === 'needs_input') await decidePublish(s.db, req, id);
-    return null;
-  });
+const waitStatusApproving = (id: string, ...st: string[]) => waitStatusApprovingWith(s.db, req, waitFor, runRow)(id, ...st);
 const branchOf = (runId: string) => `ai/run-${runId.slice(4, 14).toLowerCase()}`;
 /** bare リポジトリ（GitHub の代わり）にそのブランチが push されているか */
 const remoteHasBranch = (branch: string) => git(origin, 'for-each-ref', '--format=%(refname)', `refs/heads/${branch}`) !== '';
@@ -586,14 +580,14 @@ describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_0
     expect(git(origin, 'merge-base', '--is-ancestor', recoveredSha, `refs/heads/${branch}`)).toBe('');
   });
 
-  it('承認と工程の間に worktree の HEAD が動いたら push せず、テストと AI レビューを通してから publish 承認を作り直す', async () => {
+  it('承認待ちの間に worktree の HEAD が動いたら、PR の工程は push せず、テストと AI レビューを通してから publish 承認を作り直す', async () => {
     fake.setScenario({ plan: [{ output: PLAN }], develop: [{ writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Howdy';\n" }] }], review: [{ output: REVIEW }] });
     await webhook('issues', issuePayload('toshipy', 11));
     const created = await waitFor(async () => (await s.db.select().from(runs)).find((r) => r.issueKey === `${REPO_ID}#11`));
     expect((await waitStatus(created.id, 'needs_input', 'failed', 'waiting_review')).status).toBe('needs_input');
     const first = (await pendingPublish(s.db, created.id))!;
     const branch = branchOf(created.id);
-    // 承認した後・PR の工程の前に HEAD が動いた状況を作る（worktree に 1 コミット足す）
+    // 承認待ちの間に HEAD が動いた状況を作る（承認する前に worktree へ 1 コミット足す）
     const wt = join(dataRoot, 'worktrees', created.id);
     writeFileSync(join(wt, 'late.txt'), 'late\n');
     git(wt, 'add', 'late.txt');

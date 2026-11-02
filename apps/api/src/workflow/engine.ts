@@ -1062,6 +1062,18 @@ export class WorkflowEngine {
       await this.failRun(run.id, 'PUBLISH_PREVIEW_MISSING', 'publish 承認に載せる PR の内容がありません');
       return;
     }
+    // 遷移の前に未決の承認を確かめる（createApproval は未決があると何もしないため、判断できない needs_input で止まらないようにする）
+    const pending = await this.db
+      .select({ actionType: approvals.actionType })
+      .from(approvals)
+      .where(and(eq(approvals.runId, run.id), eq(approvals.status, 'pending')));
+    if (pending.some((a) => a.actionType === 'publish')) {
+      // 既に publish 承認を待っている（復旧処理の再入など）: それを使う
+      await this.transition(run.id, 'needs_input');
+      return;
+    }
+    // それ以外の未決は、前の状態のもので意味を失っている。残すと新しい publish 承認が作られない
+    if (pending.length > 0) await this.supersedePendingApprovals(run.id);
     const r = await this.transition(run.id, 'needs_input');
     if (!r) return;
     const update = r.pr !== null;
