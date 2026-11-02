@@ -3,7 +3,7 @@
  * ここを通って Run になる。他人のエージェントと同じ Issue を取り合わないよう、着手時に自分をアサインする。
  * GitHub を呼ぶのは verification が github_app の接続だけ。シミュレーターの接続は従来どおりペイロードから Run を作る。
  */
-import { and, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, sql } from 'drizzle-orm';
 import { TERMINAL_RUN_STATUSES } from '@paw/contracts';
 import type { Db } from '../db/client';
 import { projects, repositoryBindings, runs, workspaces, type RunSource } from '../db/schema';
@@ -81,11 +81,19 @@ export class IssueIntake {
       .from(runs)
       .where(and(eq(runs.workspaceId, b.workspaceId), eq(runs.projectId, b.projectId), notTerminal()));
     const runIdOf = new Map(active.map((r) => [r.issueKey, r.id]));
+    const lastPrRunOf = await this.lastPrRuns(b);
     const out = { candidates: [] as IssueRow[], materials: [] as IssueRow[], running: [] as IssueRow[] };
     for (const i of issues) {
-      const row: IssueRow = { ...i, runId: runIdOf.get(`${b.repositoryId}#${i.number}`) ?? null, skipReason: null };
+      const key = `${b.repositoryId}#${i.number}`;
+      const row: IssueRow = { ...i, runId: runIdOf.get(key) ?? null, skipReason: null };
       if (row.runId) {
         out.running.push(row);
+        continue;
+      }
+      // 終わった Run の PR がまだ開いていれば、実行中と同じ欄に出す（任せると 2 本目の PR になるため）
+      const prRun = lastPrRunOf.get(key);
+      if (prRun && (await this.prOpen(b, prRun.pr.number, true))) {
+        out.running.push({ ...row, runId: prRun.id, skipReason: 'open_pr' });
         continue;
       }
       // 担当が自分だけ、または未アサインのものだけ。他人の担当は見せない
@@ -134,6 +142,11 @@ export class IssueIntake {
       .where(and(eq(runs.workspaceId, binding.workspaceId), eq(runs.issueKey, issueKey), notTerminal()))
       .limit(1);
     if (dup) return { skipped: 'duplicate_issue_run' };
+    // 終わった Run（中止・失敗・Approve で完了しマージ前）の PR がまだ開いていれば、2 本目の PR を作らない
+    if (real) {
+      const prRun = (await this.lastPrRuns(binding, issueKey)).get(issueKey);
+      if (prRun && (await this.prOpen(binding, prRun.pr.number, false))) return { skipped: 'open_pr' };
+    }
 
     // 3〜5. GitHub への変更は、途中で見送り・失敗したら全部戻す（付けたラベル・外した needs-human・自分のアサイン）
     const label = real ? AGENTS_OFFICE_LABEL : binding.policy.triggerLabel;
@@ -181,6 +194,31 @@ export class IssueIntake {
       throw err;
     }
     return { runId: created.id };
+  }
+
+  /** Issue ごとの、PR のある直近の Run（issueKey を渡せばその Issue だけ） */
+  private async lastPrRuns(b: Binding, issueKey?: string): Promise<Map<string, { id: string; pr: { number: number } }>> {
+    const rows = await this.db
+      .select({ id: runs.id, issueKey: runs.issueKey, pr: runs.pr })
+      .from(runs)
+      .where(and(eq(runs.workspaceId, b.workspaceId), eq(runs.projectId, b.projectId), isNotNull(runs.pr), ...(issueKey ? [eq(runs.issueKey, issueKey)] : [])))
+      .orderBy(desc(runs.createdAt));
+    const out = new Map<string, { id: string; pr: { number: number } }>();
+    for (const r of rows) if (r.issueKey && r.pr && !out.has(r.issueKey)) out.set(r.issueKey, { id: r.id, pr: r.pr });
+    return out;
+  }
+
+  /**
+   * GitHub でその PR が開いているか。一覧では取得に失敗したら開いているとみなす（任せられる欄に出さない）。
+   * 着手では失敗を投げる（見送りにすると、付けたラベルが付け直すまで拾われないため）
+   */
+  private async prOpen(b: Binding, number: number, assumeOpenOnError: boolean): Promise<boolean> {
+    try {
+      return (await this.github!.getPull(b.installationId, b.fullName, number)).state === 'open';
+    } catch (err) {
+      if (assumeOpenOnError) return true;
+      throw err;
+    }
   }
 
   private async createRunFor(

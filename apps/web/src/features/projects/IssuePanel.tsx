@@ -1,6 +1,7 @@
 /**
  * 案件ごとの Issue 一覧（GitHub App で接続した Project だけ）。
  * 「候補」「資料済み」「実行中」の 3 欄に分け、候補と資料済みは「AI に任せる」で Run を始める。
+ * 前の Run の PR がまだ開いている Issue も「実行中」に出す（見送り理由 open_pr を行に出す）。
  * ラベル付け・自分のアサインはサーバーが行う。ここでは見送り理由を日本語で行に出すだけ。
  */
 import { useState } from 'react';
@@ -17,6 +18,7 @@ const SKIP_TEXT: Record<string, string> = {
   assign_failed: '自分のアサインに失敗したため見送りました',
   nightly: '夜間の自動処理に回す Issue のため任せられません',
   duplicate_issue_run: 'この Issue は既に実行中です',
+  open_pr: '前の Run の PR がまだ開いています（マージか close の後に任せられます）',
   not_an_issue: 'Issue ではなく PR のため任せられません',
   issue_closed: '閉じられた Issue のため任せられません',
   github_unavailable: 'GitHub に接続できないため見送りました',

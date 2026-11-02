@@ -1,7 +1,8 @@
 /**
  * 失敗・中止で終わった Run の GitHub を片付ける。
  *  - agents-office ラベルを外す（残すとポーリングが同じ Issue をまた始めてしまう）
- *  - 着手時に自分をアサインしていた（source.assignedBySelf）なら、そのアサインを外して他の人に Issue が空いたと分かるようにする
+ *  - 着手時に自分をアサインしていた（source.assignedBySelf）なら、そのアサインを外して他の人に Issue が空いたと分かるようにする。
+ *    ただし、この Run の PR がまだ開いている間は外さない（Issue はまだ空いていない）
  * 失敗・中止の理由は Issue に書かない（コメントは投稿しない）。承認なしで行ってよいのはこの 2 つの取り外しだけ。
  * GitHub の失敗はログだけ残して投げない（Run の終わりの処理を止めない）。
  */
@@ -36,7 +37,11 @@ export class IssueCleanup {
       }
       if (run.source.assignedBySelf === true && this.login) {
         try {
-          await this.github.removeAssignees(binding.installationId, binding.fullName, issue, [this.login]);
+          // この Run の PR がまだ開いている間は担当を外さない（他の人・エージェントが同じ Issue に 2 本目の PR を作らないように）。
+          // 開いているか確かめられなければ外さない
+          const prOpen = run.pr ? (await this.github.getPull(binding.installationId, binding.fullName, run.pr.number).then((p) => p.state === 'open', () => true)) : false;
+          if (prOpen) log.info('issue cleanup: keep assignment while the PR is open', { runId: run.id, issue, pr: run.pr?.number });
+          else await this.github.removeAssignees(binding.installationId, binding.fullName, issue, [this.login]);
         } catch (err) {
           log.warn('issue cleanup: unassign failed', { runId: run.id, issue, err: String(err) });
         }

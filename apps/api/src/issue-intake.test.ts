@@ -24,7 +24,10 @@ const mk = (number: number, extra: Partial<Row> = {}): Row => ({ number, title: 
 let state: Row[] = [];
 /** 次の getIssue で他人が割り当てられた状態にする（同時アサインの再現） */
 let raceAssignee: string | null = null;
+/** PR 番号ごとの状態（無ければ closed） */
+const pullState = new Map<number, 'open' | 'closed'>();
 const fake = {
+  getPull: vi.fn(async (_i: number, _f: string, n: number) => ({ state: pullState.get(n) ?? 'closed', merged: false, headSha: 'x' })),
   listOpenIssues: vi.fn(async () => state.map((i) => ({ ...i }))),
   getIssue: vi.fn(async (_i: number, _f: string, n: number) => ({ ...state.find((i) => i.number === n)! })),
   listIssueComments: vi.fn(async () => [
@@ -98,6 +101,7 @@ afterAll(async () => {
 beforeEach(async () => {
   vi.clearAllMocks();
   raceAssignee = null;
+  pullState.clear();
   state = [];
   await s.client.exec('truncate table runs cascade');
 });
@@ -256,6 +260,58 @@ describe('IssueIntake.start の巻き戻しと安全', () => {
   }, 30_000);
 });
 
+describe('PR が開いたままの Issue（2 本目の PR を作らない）', () => {
+  /** Issue の Run を作り、PR を付けて終端（status）にする */
+  async function finishedWithPr(n: number, status: 'cancelled' | 'failed' | 'completed', prNumber: number) {
+    const r = await intake.start(binding, n, { via: 'ui', labeledBy: null, guidance: null });
+    const runId = (r as { runId: string }).runId;
+    await s.db
+      .update(runs)
+      .set({ status, pr: { number: prNumber, url: `https://github.com/${FULL_NAME}/pull/${prNumber}`, branch: 'ai/run-x', headSha: 'a'.repeat(40), draft: false } })
+      .where(eq(runs.id, runId));
+    vi.clearAllMocks();
+    return runId;
+  }
+
+  it.each(['cancelled', 'failed', 'completed'] as const)('前の Run（%s）の PR が開いていれば、任せても見送る（open_pr）', async (status) => {
+    state = [mk(50)];
+    await finishedWithPr(50, status, 90);
+    pullState.set(90, 'open');
+    const r = await intake.start(binding, 50, { via: 'ui', labeledBy: null, guidance: null });
+    expect(r).toEqual({ skipped: 'open_pr' });
+    expect(fake.getPull).toHaveBeenCalledWith(INSTALLATION_ID, FULL_NAME, 90);
+    expect(fake.addLabels).not.toHaveBeenCalled();
+    expect(fake.addAssignees).not.toHaveBeenCalled();
+    expect(await s.db.select().from(runs)).toHaveLength(1);
+  });
+
+  it('前の Run の PR が閉じていれば始める', async () => {
+    state = [mk(51)];
+    await finishedWithPr(51, 'cancelled', 91);
+    pullState.set(91, 'closed');
+    const r = await intake.start(binding, 51, { via: 'ui', labeledBy: null, guidance: null });
+    expect('runId' in r).toBe(true);
+  });
+
+  it('一覧では、PR が開いている Issue を実行中の欄に出し、その Run を指す', async () => {
+    state = [mk(52), mk(53)];
+    const runId = await finishedWithPr(52, 'completed', 92);
+    pullState.set(92, 'open');
+    const l = await intake.list(projectId);
+    expect(l.candidates.map((i) => i.number)).toEqual([53]);
+    expect(l.running).toEqual([expect.objectContaining({ number: 52, runId, skipReason: 'open_pr' })]);
+  });
+
+  it('一覧で PR の状態を取れなければ、任せられる欄に出さない', async () => {
+    state = [mk(54)];
+    await finishedWithPr(54, 'failed', 94);
+    (fake.getPull as any).mockRejectedValueOnce(new Error('boom'));
+    const l = await intake.list(projectId);
+    expect(l.candidates).toEqual([]);
+    expect(l.running.map((i) => i.skipReason)).toEqual(['open_pr']);
+  });
+});
+
 describe('IssueIntake.list', () => {
   it('一覧は 3 つの欄に分かれ、nightly-ok と他人の担当を出さない（PR の除外は GithubApp.listOpenIssues 側）', async () => {
     state = [mk(20), mk(21, { labels: ['needs-human'] }), mk(22, { labels: ['nightly-ok'] }), mk(23, { assignees: ['someone'] }), mk(24, { assignees: [LOGIN] }), mk(25)];
@@ -345,6 +401,32 @@ describe('Run の終わりの片付け（IssueCleanup）', () => {
     (fake.removeLabel as any).mockRejectedValueOnce(new Error('boom'));
     await expect(new IssueCleanup(s.db, fake, LOGIN).onAbandoned(run)).resolves.toBeUndefined();
     expect(fake.removeAssignees).toHaveBeenCalledWith(INSTALLATION_ID, FULL_NAME, 42, [LOGIN]);
+  });
+
+  it('PR が開いたまま中止・失敗した Run は、ラベルだけ外して自分のアサインは残す', async () => {
+    state = [mk(44)];
+    const r = await intake.start(binding, 44, { via: 'ui', labeledBy: null, guidance: null });
+    const runId = (r as { runId: string }).runId;
+    await s.db.update(runs).set({ pr: { number: 95, url: 'u', branch: 'ai/run-x', headSha: 'a'.repeat(40), draft: false } }).where(eq(runs.id, runId));
+    pullState.set(95, 'open');
+    await s.engine.transition(runId, 'planning');
+    await s.engine.failRun(runId, 'TEST_FAILURE', '失敗させた');
+    await waitCalls(fake.removeLabel as any, 1);
+    await waitCalls(fake.getPull as any, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fake.removeLabel).toHaveBeenCalledWith(INSTALLATION_ID, FULL_NAME, 44, 'agents-office');
+    expect(fake.removeAssignees).not.toHaveBeenCalled();
+    expect(state[0].assignees).toEqual([LOGIN]);
+  });
+
+  it('PR が閉じていれば、自分のアサインも外す', async () => {
+    state = [mk(45)];
+    const r = await intake.start(binding, 45, { via: 'ui', labeledBy: null, guidance: null });
+    const runId = (r as { runId: string }).runId;
+    await s.db.update(runs).set({ pr: { number: 96, url: 'u', branch: 'ai/run-x', headSha: 'a'.repeat(40), draft: false } }).where(eq(runs.id, runId));
+    await s.engine.cancelRun(runId, 'やめる');
+    await waitCalls(fake.removeAssignees as any, 1);
+    expect(fake.removeAssignees).toHaveBeenCalledWith(INSTALLATION_ID, FULL_NAME, 45, [LOGIN]);
   });
 
   it('Issue の Run でなければ何もしない', async () => {
