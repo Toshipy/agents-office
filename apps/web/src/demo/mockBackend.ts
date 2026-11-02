@@ -915,6 +915,8 @@ class DemoServer {
       }];
     }
     if (method === 'GET' && path === '/v1/audit-logs') return [200, { items: this.audit.slice(0, 100) }];
+    // Issue 一覧は GitHub App 接続の Project だけの機能。デモでは空を返す（任せる操作は再現しない）
+    if (method === 'GET' && /^\/v1\/projects\/[^/]+\/issues$/.test(path)) return [200, { candidates: [], materials: [], running: [] }];
     if (method === 'GET' && path === '/v1/projects') return [200, { items: this.projects.map((p) => this.projectDto(p)) }];
     if (method === 'GET' && path === '/v1/integrations/github/installations') return [200, { mode: 'simulated', installations: [] }];
     if ((m = path.match(/^\/v1\/projects\/([^/]+)\/automation-policy$/)) && method === 'PUT') {

@@ -7,6 +7,7 @@ import { ApiError, api, type GithubInstallationsDto, type ProjectDto } from '../
 import { useAuthConfig } from '../../shared/api/authConfig';
 import { Icon } from '../../shared/ui/Icon';
 import { toast } from '../../shared/ui/toast';
+import { IssuePanel } from './IssuePanel';
 import { isClaudeRuntime, runtimeLabel } from '../../shared/runtime';
 
 const COLORS = ['#5eead4', '#fb7185', '#a78bfa', '#fbbf24', '#60a5fa', '#34d399', '#f472b6', '#fb923c'];
@@ -149,7 +150,9 @@ function CreateProject({ onDone, githubApp }: { onDone(): void; githubApp: boole
 
 function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto; githubApp: boolean; onChange(): void }) {
   const [repo, setRepo] = useState('');
-  const [label, setLabel] = useState(p.repository?.policy.triggerLabel ?? 'agents-office');
+  // GitHub App で接続した Repo は起動ラベルが agents-office 固定（API も他のラベルを 422 で拒む）
+  const labelFixed = p.repository?.verification === 'github_app';
+  const [label, setLabel] = useState(labelFixed ? 'agents-office' : (p.repository?.policy.triggerLabel ?? 'agents-office'));
   const [maxRev, setMaxRev] = useState(p.repository?.policy.maxRevisionAttempts ?? 3);
   const [sim, setSim] = useState(false);
   const [localPath, setLocalPath] = useState(p.repository?.localPath ?? '');
@@ -170,7 +173,7 @@ function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto;
       () =>
         api.put(`/v1/projects/${p.id}/automation-policy`, {
           enabled,
-          triggerLabel: label.trim() || 'agents-office',
+          triggerLabel: labelFixed ? 'agents-office' : label.trim() || 'agents-office',
           events: ['issues.opened', 'issues.labeled'],
           maxRevisionAttempts: Number(maxRev),
         }),
@@ -303,6 +306,15 @@ function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto;
         </div>
       ) : null}
 
+      {p.repository?.verification === 'github_app' && p.status === 'active' ? (
+        <div className="pa-section">
+          <h4>
+            <Icon name="git-pr" size={14} /> Issue
+          </h4>
+          <IssuePanel projectId={p.id} />
+        </div>
+      ) : null}
+
       {p.repository ? (
         <div className="pa-section">
           <h4>
@@ -312,7 +324,8 @@ function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto;
             <span className={`auto-badge${p.repository.automationEnabled ? ' on' : ''}`}>{p.repository.automationEnabled ? 'ON' : 'OFF'}</span>
             <label>
               トリガーラベル
-              <input className="mono" value={label} onChange={(e) => setLabel(e.target.value)} />
+              <input className="mono" value={label} onChange={(e) => setLabel(e.target.value)} readOnly={labelFixed} title={labelFixed ? 'GitHub App で接続した Repo では固定です' : undefined} />
+              {labelFixed ? <span className="faint small"> 固定</span> : null}
             </label>
             <label>
               再修正上限
@@ -331,7 +344,7 @@ function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto;
               {p.repository.automationEnabled ? '自動起動を OFF' : '自動起動を ON'}
             </button>
           </div>
-          <p className="hint">対象: issues.opened / issues.labeled のうち、ラベル「{p.repository.policy.triggerLabel}」が付いた Issue のみ。条件不一致は記録だけ残し、Run は作りません。</p>
+          <p className="hint">対象: issues.opened / issues.labeled のうち、ラベル「{labelFixed ? 'agents-office' : p.repository.policy.triggerLabel}」が付いた Issue のみ。条件不一致は記録だけ残し、Run は作りません。</p>
           {/* 本物の GitHub につないだ Repo では、偽の Issue で Run が始まらないようシミュレーターを出さない */}
           {devRoutes && !p.repository.managedCheckout ? (
             <button className="btn ghost small" onClick={() => setSim((v) => !v)}>

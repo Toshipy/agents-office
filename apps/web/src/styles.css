@@ -3044,3 +3044,55 @@ label.check {
 .gh-banner p {
   margin: 2px 0 0;
 }
+
+/* Issue パネル（Projects・GitHub App 接続のみ） */
+.issue-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+.issue-col h5 {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+.issue-col ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.issue-row {
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  padding: 8px;
+}
+.issue-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.issue-title {
+  flex: 1 1 100%;
+  font-size: 13px;
+}
+.issue-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+}
+.issue-delegate {
+  margin-top: 6px;
+}
+.issue-delegate textarea {
+  width: 100%;
+}
+.approval-card .pub-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
