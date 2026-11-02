@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { defaultClaudeCodeConfig, loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
-import { approvals, runSteps, runs, usageRecords } from './db/schema';
+import { approvals, artifacts, runSteps, runs, usageRecords } from './db/schema';
 import { ClaudeCodeBackend } from './agents/claude/cliBackend';
 import { probeClaudeCode, resolveAgentRuntime } from './agents/claude/detect';
 import { RunnerError, type StepExecutionContext } from './agents/runner';
@@ -335,6 +335,10 @@ describe('publish 承認（GitHub への書き込みの前の人の承認）', {
       update: false,
     });
     expect(String(ap!.payload.diffSha256)).toMatch(/^[0-9a-f]{64}$/);
+    // 承認カードが開く差分は、承認する差分と同じ中身の成果物
+    const diffArts = (await s.db.select().from(artifacts).where(eq(artifacts.runId, runId))).filter((x) => x.kind === 'diff');
+    expect(ap!.payload.diffArtifactId).toBe(diffArts.find((x) => x.checksum === `sha256:${ap!.payload.diffSha256}`)?.id);
+    expect(ap!.payload.diffArtifactId).toEqual(expect.any(String));
     expect(String(ap!.payload.body)).toContain('この PR は agents-office が作りました。マージは人が行います。');
     // 画面からの指示の Run（Issue なし）は Closes 行を付けない
     expect(String(ap!.payload.body)).not.toContain('Closes #');

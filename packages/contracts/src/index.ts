@@ -477,14 +477,14 @@ export const STEP_KEY_LABEL: Record<StepKey, string> = {
   implement: '実装',
   test: 'テスト',
   review: 'レビュー',
-  draft_pr: 'Draft PR作成',
+  draft_pr: 'PR作成',
   update_pr: 'PR更新',
   materials: '判断材料',
   post_materials: '資料コメント',
 };
 
 export const APPROVAL_TYPE_LABEL: Record<ApprovalActionType, string> = {
-  pr_review: 'Draft PR レビュー',
+  pr_review: 'PR レビュー',
   dangerous_operation: '危険操作の検知',
   clarification: '判断・追加指示が必要',
   publish: 'GitHub への書き込み',

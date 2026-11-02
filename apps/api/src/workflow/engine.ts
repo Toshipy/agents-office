@@ -25,6 +25,7 @@ import type { Db } from '../db/client';
 import {
   agentDefinitions,
   approvals,
+  artifacts,
   repositoryBindings,
   runSteps,
   runs,
@@ -973,7 +974,7 @@ export class WorkflowEngine {
       case 'update_pr': {
         const pr = o.pr as RunPr | undefined;
         if (!pr) {
-          await this.failRun(run.id, 'PR_MISSING', 'Draft PR の結果がありません');
+          await this.failRun(run.id, 'PR_MISSING', 'PR の結果がありません');
           return;
         }
         const r1 = await this.transition(run.id, 'pr_ready', { pr });
@@ -987,7 +988,7 @@ export class WorkflowEngine {
           .orderBy(desc(runSteps.seq));
         const lastTest = prior.find((p) => p.key === 'test');
         const lastImpl = prior.find((p) => p.key === 'implement');
-        await this.createApproval(r2, 'pr_review', 'reviewer', `Draft PR #${pr.number} のレビュー`, {
+        await this.createApproval(r2, 'pr_review', 'reviewer', `PR #${pr.number} のレビュー`, {
           pr,
           revision: r2.revisionCount,
           testsPassed: lastTest?.outcome?.passed ?? null,
@@ -1106,10 +1107,18 @@ export class WorkflowEngine {
       return;
     }
     const update = run.pr !== null;
+    // 承認する差分（diffSha256）と同じ中身の差分の成果物を結び付ける。カードはこの成果物だけを開く（無ければ一致しない旨を出す）
+    const [diffArtifact] = await this.db
+      .select({ id: artifacts.id })
+      .from(artifacts)
+      .where(and(eq(artifacts.workspaceId, run.workspaceId), eq(artifacts.runId, run.id), eq(artifacts.kind, 'diff'), eq(artifacts.checksum, `sha256:${p.diffSha256}`)))
+      .orderBy(desc(artifacts.createdAt))
+      .limit(1);
     await this.openPublishApproval(run, 'reviewer', update ? `PR #${run.pr!.number} の更新を GitHub に書き込む` : 'PR を GitHub に作る', {
       kind: 'pull_request',
       headSha: p.headSha,
       diffSha256: p.diffSha256,
+      diffArtifactId: diffArtifact?.id ?? null,
       title: p.title,
       body: p.body,
       // 終わりのラベル操作: PR を作るとき（GitHub App の Issue の Run）だけ agents-office を外す。更新では何も変えない

@@ -32,10 +32,11 @@ function PublishBody({ approval: a }: { approval: ApprovalDto }) {
   const p = a.payload;
   const [diffOpen, setDiffOpen] = useState(false);
   const isPr = p.kind === 'pull_request';
-  // 差分とテスト結果は Run の成果物から探す（承認の payload には差分のハッシュしか無い）
+  // 差分は承認の payload が指す成果物（承認する差分と同じ中身）だけを開く。テスト結果は Run の成果物から探す
   const run = useQuery({ queryKey: ['run', a.runId], queryFn: () => api.get<RunDetail>(`/v1/runs/${a.runId}`), enabled: isPr });
   const arts = run.data?.artifacts ?? [];
-  const diff = [...arts].reverse().find((x) => x.kind === 'diff');
+  const diffId = typeof p.diffArtifactId === 'string' ? p.diffArtifactId : null;
+  const diffTitle = arts.find((x) => x.id === diffId)?.title ?? '差分';
   const test = [...arts].reverse().find((x) => x.kind === 'test_report');
   const remove: string[] = p.labels?.remove ?? [];
   const add: string[] = p.labels?.add ?? [];
@@ -74,14 +75,12 @@ function PublishBody({ approval: a }: { approval: ApprovalDto }) {
           <div>
             <dt>差分</dt>
             <dd>
-              {diff ? (
+              {diffId ? (
                 <button className="btn ghost small" onClick={() => setDiffOpen(true)}>
-                  {diff.title} を開く
+                  {diffTitle} を開く
                 </button>
-              ) : run.isLoading ? (
-                '読み込み中…'
               ) : (
-                '—'
+                <span className="hint warn">承認する差分と一致する成果物がありません（ハッシュで確かめてください）</span>
               )}
               <span className="mono faint small"> {String(p.diffSha256 ?? '').slice(0, 19)}…</span>
             </dd>
@@ -99,9 +98,9 @@ function PublishBody({ approval: a }: { approval: ApprovalDto }) {
             </div>
           ) : null}
         </dl>
-        {diffOpen && diff ? (
-          <Modal title={diff.title} onClose={() => setDiffOpen(false)} wide>
-            <ArtifactBody artifactId={diff.id} />
+        {diffOpen && diffId ? (
+          <Modal title={diffTitle} onClose={() => setDiffOpen(false)} wide>
+            <ArtifactBody artifactId={diffId} />
           </Modal>
         ) : null}
       </>
@@ -190,7 +189,7 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
           <>
             <dl className="kv cols">
               <div>
-                <dt>Draft PR</dt>
+                <dt>PR</dt>
                 <dd className="mono">
                   {typeof p.pr?.url === 'string' && p.pr.url.startsWith('https://') ? (
                     <a href={p.pr.url} target="_blank" rel="noreferrer">

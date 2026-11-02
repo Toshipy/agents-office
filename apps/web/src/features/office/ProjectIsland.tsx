@@ -164,7 +164,7 @@ function IslandImpl({ project, seats, position, focused, anyFocused, zoomedIn, s
             </span>
             <span className="ic-rows">
               <span>
-                Open Draft PR <b>{s.openPrs}</b>
+                Open PR <b>{s.openPrs}</b>
               </span>
               <span>
                 完了 (24h) <b>{s.done24h}</b>

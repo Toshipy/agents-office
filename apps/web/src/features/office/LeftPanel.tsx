@@ -141,7 +141,7 @@ function ProjectSummary({ snapshot, project }: { snapshot: OfficeState; project:
         <p className="muted small">{project.description || '説明なし'}</p>
         <dl className="kv">
           <div>
-            <dt>Open Draft PR</dt>
+            <dt>Open PR</dt>
             <dd>{st.openPrs}</dd>
           </div>
           <div>

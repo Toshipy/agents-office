@@ -62,7 +62,7 @@ export function registerApprovalRoutes(app: Hono<AppEnv>, s: Services) {
       if (ap.payloadDigest !== body.confirmationDigest) throw await deny(409, 'DIGEST_MISMATCH', '承認対象の内容が変わっています。内容を再確認してください');
       if (ap.expiresAt.getTime() <= Date.now()) throw await deny(410, 'APPROVAL_EXPIRED', '承認期限が切れています');
       if (ap.actionType === 'pr_review') {
-        throw await deny(409, 'DECIDE_ON_GITHUB', 'Draft PR のレビューは GitHub 上で行います（ローカル版は GitHub シミュレーターを使用）');
+        throw await deny(409, 'DECIDE_ON_GITHUB', 'PR のレビューは GitHub 上で行います（ローカル版は GitHub シミュレーターを使用）');
       }
       if (ap.actionType === 'dangerous_operation' && body.decision === 'approve') {
         throw await deny(403, 'POLICY_FORBIDDEN', 'MVP では危険な操作は承認しても実行できません。差し戻し（安全な範囲で再計画）か却下を選んでください');

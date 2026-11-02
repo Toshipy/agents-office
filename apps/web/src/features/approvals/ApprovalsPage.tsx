@@ -35,7 +35,7 @@ export function ApprovalsPage() {
           <div className="empty-state">
             <Icon name="check-circle" size={28} />
             <h2>承認待ちはありません</h2>
-            <p className="muted">AI が Draft PR を作成したり、危険な操作を検知すると、ここに表示されます。</p>
+            <p className="muted">AI が PR を作る前や、危険な操作を検知すると、ここに表示されます。</p>
           </div>
         ) : null}
       </div>

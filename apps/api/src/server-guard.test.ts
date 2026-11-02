@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { generateKeyPairSync } from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { loadConfig, type AppConfig } from './config';
 import { assertSafeServerConfig } from './serverGuard';
 
@@ -40,4 +44,30 @@ describe('assertSafeServerConfig', () => {
     expect(() => assertSafeServerConfig(cfg({ ...safe, signup: 'open', seedDemo: true }))).toThrow(/PAW_SIGNUP[\s\S]*PAW_SEED_DEMO/));
   it('claude_code 以外の実行基盤では --restricted の 2 項目を見ない', () =>
     expect(() => assertSafeServerConfig(cfg({ ...safe, agentRuntime: 'simulated', claudeCode: { restricted: false, detected: null } }))).not.toThrow());
+});
+
+describe('GitHub の許可ユーザーの既定（PAW_GITHUB_ALLOWED_USERS）', () => {
+  const keys = ['PAW_DATA_DIR', 'PAW_GITHUB_APP_ID', 'PAW_GITHUB_APP_PRIVATE_KEY', 'PAW_GITHUB_LOGIN', 'PAW_GITHUB_ALLOWED_USERS'] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  afterEach(() => {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+  const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  function load(env: { login?: string; allowed?: string }) {
+    process.env.PAW_DATA_DIR = mkdtempSync(join(tmpdir(), 'paw-cfg-'));
+    process.env.PAW_GITHUB_APP_ID = '1';
+    process.env.PAW_GITHUB_APP_PRIVATE_KEY = pem;
+    if (env.login === undefined) delete process.env.PAW_GITHUB_LOGIN;
+    else process.env.PAW_GITHUB_LOGIN = env.login;
+    if (env.allowed === undefined) delete process.env.PAW_GITHUB_ALLOWED_USERS;
+    else process.env.PAW_GITHUB_ALLOWED_USERS = env.allowed;
+    return loadConfig({ logLevel: 'silent' }).githubApp!.allowedUsers;
+  }
+
+  it('未設定で PAW_GITHUB_LOGIN があれば、自分だけを許す', () => expect(load({ login: 'ToshiPy' })).toEqual(['toshipy']));
+  it('設定があればそれを使う', () => expect(load({ login: 'toshipy', allowed: 'Alice, bob' })).toEqual(['alice', 'bob']));
+  it('どちらも無ければ空（Run を起動しない）', () => expect(load({})).toEqual([]));
 });

@@ -594,7 +594,11 @@ export class ClaudeRunner implements AgentRunner {
     // push・PR 作成の前に、作業ツリーの .git が書き換えられていないことを確かめる
     await assertGitLink(wt);
     // 人が publish 承認で確かめた head と今の HEAD が違えば、承認していない内容なので何も書かない（エンジンが承認を作り直す）
-    const approved = ctx.previous.publish as { headSha?: unknown; title?: unknown; body?: unknown; labels?: { remove?: unknown; add?: unknown } } | undefined;
+    const approved = ctx.previous.publish as { kind?: unknown; update?: unknown; headSha?: unknown; title?: unknown; body?: unknown; labels?: { remove?: unknown; add?: unknown } } | undefined;
+    // 人が承認したのが PR の操作で、作成・更新の別がこの工程（draft_pr / update_pr）と一致するときだけ書く
+    if (approved && (approved.kind !== 'pull_request' || approved.update !== (ctx.key === 'update_pr'))) {
+      throw new RunnerError('人が承認した内容と、この PR の工程（作成・更新）が一致しません', 'PUBLISH_NOT_APPROVED', false);
+    }
     const head = await headSha(wt);
     if (!approved || approved.headSha !== head) {
       await ctx.log(`承認した head（${String(approved?.headSha ?? 'なし').slice(0, 12)}）と worktree の HEAD（${head.slice(0, 12)}）が違うため、push せずテストと AI レビューからやり直します`, 'error');

@@ -252,7 +252,7 @@ function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto;
             <span className={`runtime-pill ${p.repository.runtime ?? 'simulated'}`}>{isClaudeRuntime(p.repository.runtime) ? `${runtimeLabel(p.repository.runtime)} で実行` : 'シミュレーション'}</span>
           </h4>
           <p className="small">
-            サーバーが GitHub から取得した作業コピーを使います（起点: <span className="mono">{p.repository.defaultBranch ?? '既定ブランチ'}</span>）。結果は <span className="mono">ai/run-…</span> ブランチとして GitHub に push し、Draft PR を作ります。
+            サーバーが GitHub から取得した作業コピーを使います（起点: <span className="mono">{p.repository.defaultBranch ?? '既定ブランチ'}</span>）。結果は <span className="mono">ai/run-…</span> ブランチとして、人の承認の後に GitHub に push し、PR を作ります。
           </p>
           <div className="form-grid">
             <label className="span-2">

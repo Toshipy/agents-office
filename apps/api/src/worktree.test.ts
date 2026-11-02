@@ -258,6 +258,26 @@ describe('worktree', () => {
     });
   });
 
+  it.each([
+    ['資料の承認', 'draft_pr', { kind: 'materials', comment: 'x' }],
+    ['作成の承認で更新の工程', 'update_pr', { kind: 'pull_request', update: false }],
+    ['更新の承認で作成の工程', 'draft_pr', { kind: 'pull_request', update: true }],
+  ])('PR の工程は、承認した内容（%s）が工程と一致しなければ何も呼ばずに PUBLISH_NOT_APPROVED で止まる', async (_n, key, publish) => {
+    const runner = new ClaudeRunner({ worktreesDir: wtDir, testTimeoutMs: 1000, testSandbox: {} as never, backend: {} as never });
+    const wt = await ensureWorktree(repo, wtDir, 'run_k', 'ai/run-k');
+    const tools: string[] = [];
+    const ctx = {
+      runId: 'run_k', stepId: 's1', key, attempt: 1, branch: 'ai/run-k', runtime: 'claude', signal: new AbortController().signal,
+      title: 't', issueNumber: null, pr: key === 'update_pr' ? { number: 3, url: 'u', branch: 'ai/run-k', headSha: 'x', draft: false } : null, repo: null,
+      previous: { publish: { headSha: wt.baseSha, diffSha256: 'x', title: 't', body: 'b', labels: { remove: [], add: [] }, ...publish } },
+      localRepo: { path: repo, testCommand: null, testImage: null }, remote: null,
+      tool: async (name: string) => (tools.push(name), { allowed: true, reason: '' }), log: async () => undefined, artifact: async () => undefined,
+      allocatePrNumber: async () => 1,
+    } as unknown as StepExecutionContext;
+    await expect(runner.execute(ctx)).rejects.toMatchObject({ code: 'PUBLISH_NOT_APPROVED', retryable: false });
+    expect(tools).toEqual([]);
+  });
+
   it('PR の工程は、承認した headSha と worktree の HEAD が違えば何も呼ばずに PUBLISH_STALE で止まる', async () => {
     const runner = new ClaudeRunner({ worktreesDir: wtDir, testTimeoutMs: 1000, testSandbox: {} as never, backend: {} as never });
     const tools: string[] = [];

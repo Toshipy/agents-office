@@ -81,10 +81,13 @@ function loadGithubApp(): AppConfig['githubApp'] {
   if (process.env.PAW_GITHUB_WEBHOOK === '1' && (!nonEmpty(process.env.PAW_GITHUB_WEBHOOK_SECRET) || process.env.PAW_GITHUB_WEBHOOK_SECRET!.trim().length < 16)) {
     throw new Error('PAW_GITHUB_WEBHOOK=1 の場合は PAW_GITHUB_WEBHOOK_SECRET（16 文字以上。App の Webhook secret と同じ値）を設定してください');
   }
-  const allowedUsers = (process.env.PAW_GITHUB_ALLOWED_USERS ?? '')
+  const listed = (process.env.PAW_GITHUB_ALLOWED_USERS ?? '')
     .split(',')
     .map((u) => u.trim().toLowerCase())
     .filter(Boolean);
+  // 未設定なら自分（PAW_GITHUB_LOGIN）だけを許す。自分が付けたラベル・レビューで動くようにするため
+  const login = nonEmpty(process.env.PAW_GITHUB_LOGIN)?.toLowerCase();
+  const allowedUsers = listed.length === 0 && login ? [login] : listed;
   return { appId, privateKeyPem: pem, apiUrl: process.env.PAW_GITHUB_API_URL?.trim() || 'https://api.github.com', allowedUsers };
 }
 

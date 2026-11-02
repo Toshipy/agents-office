@@ -82,7 +82,7 @@ export function TaskStatusPanel({ snapshot }: { snapshot: OfficeState }) {
                       {ROLE_LABEL[r.currentStep.role]} · {stepLabel(r.currentStep.key)}
                     </span>
                   ) : null}
-                  {r.prNumber ? <span>Draft PR #{r.prNumber}</span> : null}
+                  {r.prNumber ? <span>PR #{r.prNumber}</span> : null}
                   {r.sourceType === 'github_issue' ? <span>Issue #{r.issueNumber}</span> : null}
                   {runtimeTag(r.runtime) ? <span className="runtime-tag">{runtimeTag(r.runtime)}</span> : null}
                   {r.revisionCount > 0 ? <span>rev {r.revisionCount}</span> : null}

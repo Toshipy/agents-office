@@ -112,7 +112,7 @@ export function RunListPage() {
                   <div>
                     <span className={`runtime-pill ${r.runtime}`}>{runtimeLabel(r.runtime)}</span>
                   </div>
-                  {r.prNumber ? <div className="muted">Draft PR #{r.prNumber}</div> : null}
+                  {r.prNumber ? <div className="muted">PR #{r.prNumber}</div> : null}
                 </td>
                 <td className="num mono">{usd(r.costUsd)}</td>
                 <td className="small muted">{relTime(r.updatedAt)}</td>
