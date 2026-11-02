@@ -233,10 +233,13 @@ export async function changedPaths(worktree: Worktree | string): Promise<string[
   return paths.filter(Boolean);
 }
 
-/** コミットされていない変更をすべて破棄する（禁止パスの変更を検出したとき用） */
-export async function discardChanges(worktree: Worktree | string) {
+/**
+ * コミットされていない変更をすべて破棄する（禁止パスの変更を検出したとき・テストの工程の後）。
+ * ignored: true なら .gitignore に当たる未追跡のファイルと、入れ子の git リポジトリも消す（テストの生成物。未追跡の .gitignore で隠されたものも含む）
+ */
+export async function discardChanges(worktree: Worktree | string, opts: { ignored?: boolean } = {}) {
   await wtGit(worktree, ['reset', '--hard', '-q', 'HEAD']);
-  await wtGit(worktree, ['clean', '-fdq']);
+  await wtGit(worktree, ['clean', opts.ignored ? '-ffdxq' : '-fdq']);
 }
 
 /**

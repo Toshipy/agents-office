@@ -15,8 +15,7 @@
  *
  * 依頼本文・Issue・リポジトリ内容は非信頼入力として扱い、ツールポリシーは変更しない（基本設計書 9.3）。
  */
-import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { lstat, readFile } from 'node:fs/promises';
 import { PATTERNS, detectDangerous } from '@paw/sim-content';
 import type { AgentRunner, MaterialsPreview, PublishPreview, StepExecutionContext, StepOutput } from '../runner';
 import { PublishStaleError, RunnerError } from '../runner';
@@ -138,7 +137,9 @@ export class ClaudeRunner implements AgentRunner {
     const shown = files.slice(0, 400);
     let readme = '';
     for (const name of ['README.md', 'readme.md', 'README']) {
-      if (existsSync(`${worktree}/${name}`)) {
+      // 通常のファイルだけ読む（リポジトリ内のリンクで worktree の外のファイルをプロンプトに入れないため）
+      const st = await lstat(`${worktree}/${name}`).catch(() => null);
+      if (st?.isFile()) {
         readme = (await readFile(`${worktree}/${name}`, 'utf8')).slice(0, 8000);
         break;
       }
@@ -364,6 +365,9 @@ export class ClaudeRunner implements AgentRunner {
         break;
       }
     }
+    // テストが作業コピーに残したもの（生成物・CLAUDE.md など）を次の工程に渡さない。
+    // 渡すと Reviewer・Developer のプロンプトに入り、次の commitAll で PR にも入る。.git は各実行の後に確かめ済み
+    await discardChanges(wt, { ignored: true });
     const failedOutput = results.find((r) => r.exitCode !== 0)?.output ?? null;
     await ctx.artifact(
       'test_report',
