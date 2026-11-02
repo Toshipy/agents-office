@@ -538,6 +538,24 @@ describe('GitHub App integration (mock GitHub API + bare repo)', () => {
     expect(ap.payload.reason).toBe('branch_diverged');
     // 人のブランチは壊していない
     expect(git(origin, 'rev-parse', `refs/heads/${branch}`)).toBe(headBefore);
+
+    // 回復: 人が GitHub 側を Run の履歴から早送りできる形に直して「続行」→ 同じ工程から再開して waiting_review に戻る
+    const work2 = join(tmp, `human-${randomUUID()}`);
+    execFileSync('git', ['clone', '-q', origin, work2]);
+    git(work2, 'fetch', '-q', 'origin', run.pr!.headSha);
+    git(work2, 'checkout', '-q', '-B', 'fix', run.pr!.headSha);
+    writeFileSync(join(work2, 'recovered.txt'), 'ok\n');
+    git(work2, 'add', '-A');
+    git(work2, '-c', 'user.name=Human', '-c', 'user.email=human@example.com', 'commit', '-q', '-m', 'recover');
+    git(work2, 'push', '-q', '--force', 'origin', `HEAD:refs/heads/${branch}`);
+    const recoveredSha = git(work2, 'rev-parse', 'HEAD');
+    const done = await req('POST', `/v1/approvals/${ap.id}/decision`, { decision: 'approve', expectedVersion: ap.version, confirmationDigest: ap.payloadDigest });
+    expect(done.status).toBe(200);
+    const after = await waitStatus(run.id, 'waiting_review', 'failed');
+    expect(after.status).toBe('waiting_review');
+    // 人の直した履歴を土台にしたまま（取りこぼし・force push なし）
+    expect(git(origin, 'show', `${branch}:recovered.txt`)).toContain('ok');
+    expect(git(origin, 'merge-base', '--is-ancestor', recoveredSha, `refs/heads/${branch}`)).toBe('');
   });
 
   it('cancels the run when the PR is closed without merging, and rejects forged webhooks', async () => {

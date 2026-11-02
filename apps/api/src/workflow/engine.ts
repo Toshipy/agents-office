@@ -1057,6 +1057,26 @@ export class WorkflowEngine {
    * 失敗にはせず、人の「続行」でその工程から再開できるようにする（利用者の要望）。
    */
   private async pauseForUsageLimit(step: StepRow, run: RunRow, err: UsageLimitError) {
+    await this.pauseStep(step, run, err, 'Claude の利用上限に達したため一時停止', {
+      reason: 'usage_limit',
+      resetsAt: err.resetsAt,
+      note: '上限がリセットされた後に「続行」を押すと、止まった工程から再開します。差し戻すとコメントを踏まえて計画からやり直し、却下すると Run を中止します。',
+    });
+  }
+
+  /**
+   * ai/ ブランチが GitHub 側（人のコミット）と分岐した工程を一時停止し、Run を needs_input にする。
+   * 自動では解消せず（強制 push も merge もしない）、人の判断を待つ。
+   */
+  private async pauseForBranchDiverged(step: StepRow, run: RunRow, err: RunnerError) {
+    await this.pauseStep(step, run, err, 'ブランチが GitHub 側と分岐しています', {
+      reason: 'branch_diverged',
+      note: 'GitHub 上の ai/ ブランチと Run の履歴が分岐しています。GitHub 側を Run の履歴から早送りできる形に直してから「続行」を押すと、同じ工程から再開します。差し戻すとコメントを踏まえて計画からやり直し、却下すると Run を中止します。',
+    });
+  }
+
+  /** 工程を一時停止（needs_input）にして、判断待ちの clarification 承認を作る。失敗にはしない */
+  private async pauseStep(step: StepRow, run: RunRow, err: { code: string; message: string }, title: string, extra: Record<string, unknown>) {
     const now = new Date();
     await this.db.insert(stepLogs).values({
       workspaceId: run.workspaceId,
@@ -1081,50 +1101,11 @@ export class WorkflowEngine {
       { stepId: step.id, key: step.key, role: step.role, status: 'needs_input', errorCode: err.code },
       { runId: run.id, projectId: run.projectId },
     );
-    await this.createApproval(r, 'clarification', step.role === 'tool_broker' ? 'planner' : step.role, 'Claude の利用上限に達したため一時停止', {
-      reason: 'usage_limit',
-      pausedStepId: step.id,
-      stepKey: step.key,
-      resetsAt: err.resetsAt,
-      message: err.message,
-      note: '上限がリセットされた後に「続行」を押すと、止まった工程から再開します。差し戻すとコメントを踏まえて計画からやり直し、却下すると Run を中止します。',
-    });
-  }
-
-  /**
-   * ai/ ブランチが GitHub 側（人のコミット）と分岐した工程を一時停止し、Run を needs_input にする。
-   * 自動では解消せず（強制 push も merge もしない）、人の判断を待つ。
-   */
-  private async pauseForBranchDiverged(step: StepRow, run: RunRow, err: RunnerError) {
-    const now = new Date();
-    await this.db.insert(stepLogs).values({
-      workspaceId: run.workspaceId,
-      runId: run.id,
-      stepId: step.id,
-      kind: 'error',
-      message: `${err.code}: ${err.message} — Run を一時停止し、判断待ちにします`,
-    });
-    const r = await this.transition(run.id, 'needs_input');
-    if (!r) {
-      await this.db.update(runSteps).set({ status: 'cancelled', finishedAt: now }).where(eq(runSteps.id, step.id));
-      return;
-    }
-    await this.db
-      .update(runSteps)
-      .set({ status: 'needs_input', errorCode: err.code, summary: err.message.slice(0, 300), finishedAt: now })
-      .where(eq(runSteps.id, step.id));
-    await this.bus.emit(
-      run.workspaceId,
-      'step.finished',
-      { stepId: step.id, key: step.key, role: step.role, status: 'needs_input', errorCode: err.code },
-      { runId: run.id, projectId: run.projectId },
-    );
-    await this.createApproval(r, 'clarification', 'planner', 'ブランチが GitHub 側と分岐しています', {
-      reason: 'branch_diverged',
+    await this.createApproval(r, 'clarification', step.role === 'tool_broker' ? 'planner' : step.role, title, {
+      ...extra,
       pausedStepId: step.id,
       stepKey: step.key,
       message: err.message,
-      note: 'GitHub 上の ai/ ブランチと Run の履歴が分岐しています。GitHub 側を整理してから「差し戻し」でコメントを添えると計画からやり直します。却下すると Run を中止します。',
     });
   }
 
