@@ -199,7 +199,7 @@ class DemoServer {
       position: i,
       repo,
       automation,
-      triggerLabel: 'ai:ready',
+      triggerLabel: 'agents-office',
       maxRevisionAttempts: 3,
       nextPr: 40 + i * 7,
       nextIssue: 120 + i * 11,
@@ -676,7 +676,7 @@ class DemoServer {
       ['設定画面のフォームバリデーションを強化', '必須項目が空のまま保存できてしまう。'],
     ];
     const [title, body] = ISSUES[Math.floor(Math.random() * ISSUES.length)];
-    this.issue(p, title, body, Math.random() > 0.12 ? ['ai:ready', 'enhancement'] : ['question']);
+    this.issue(p, title, body, Math.random() > 0.12 ? ['agents-office', 'enhancement'] : ['question']);
   }
 
   issue(p: MProject, title: string, body: string, labels: string[]) {

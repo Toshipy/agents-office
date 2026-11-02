@@ -8,6 +8,7 @@ import { eq } from 'drizzle-orm';
 import { loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
 import { GithubPoller } from './github/poller';
+import { IssueIntake } from './github/issueIntake';
 import type { GithubApp } from './github/app';
 import { repositoryBindings, runs, webhookDeliveries, workspaces } from './db/schema';
 
@@ -37,6 +38,12 @@ const fakeGithub = {
     return gh.issues;
   }),
   lastLabeled: vi.fn(async () => (gh.labeledBy ? { login: gh.labeledBy, at: gh.labeledAt } : null)),
+  getIssue: vi.fn(async (_i: number, _f: string, n: number) => gh.issues.find((i) => i.number === n) ?? { number: n, title: 't', body: 'b', htmlUrl: 'u', labels: ['agents-office'], assignees: [], updatedAt: 'x' }),
+  listIssueComments: vi.fn(async () => []),
+  addAssignees: vi.fn(async () => undefined),
+  removeAssignees: vi.fn(async () => undefined),
+  addLabels: vi.fn(async () => undefined),
+  removeLabel: vi.fn(async () => undefined),
   getPull: vi.fn(async () => gh.pull),
   listReviews: vi.fn(async () => gh.reviews),
 } as unknown as GithubApp;
@@ -52,6 +59,8 @@ beforeAll(async () => {
       githubApp: { appId: '1', privateKeyPem: pem, apiUrl: 'http://127.0.0.1:1', allowedUsers: ['toshipy'] },
     }),
   );
+  // 実 GitHub を向く IssueIntake を、モックの GithubApp を使うものに差し替える
+  (s.dispatcher as unknown as { intake: IssueIntake }).intake = new IssueIntake(s.db, s.engine, fakeGithub, 'toshipy');
   const app = createApp(s);
   const r = await app.request('/v1/auth/signup', {
     method: 'POST',

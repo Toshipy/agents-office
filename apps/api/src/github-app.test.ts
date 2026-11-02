@@ -72,8 +72,10 @@ const ops = {
     }
     if (method === 'GET' && (m = path.match(/^\/repos\/[^/]+\/[^/]+\/issues\/(\d+)$/))) {
       if (!needInstallation()) return true;
-      const i = ops.issues.find((x) => x.number === Number(m![1]));
-      send(i ? 200 : 404, i ?? { message: 'Not Found' });
+      const n = Number(m![1]);
+      const i = ops.issues.find((x) => x.number === n);
+      // Webhook から来る Issue は ops.issues に無いので、IssueIntake が取り直す分は同じ内容を返す
+      send(200, i ?? { number: n, title: 'greet の文言を変更', body: 'greet() が Hello, world を返すようにしてください', html_url: `https://github.com/${FULL_NAME}/issues/${n}`, labels: [{ name: 'agents-office' }], assignees: [], updated_at: '2026-01-01T00:00:00Z' });
       return true;
     }
     if (method === 'GET' && (m = path.match(/\/issues\/(\d+)\/comments$/))) {
@@ -271,12 +273,12 @@ const repository = { id: REPO_ID, full_name: FULL_NAME };
 const installation = { id: INSTALLATION_ID };
 const issuePayload = (sender: string, number = 5) => ({
   action: 'labeled',
-  label: { name: 'ai:ready' },
+  label: { name: 'agents-office' },
   issue: {
     number,
     title: 'greet の文言を変更',
     body: 'greet() が Hello, world を返すようにしてください',
-    labels: [{ name: 'ai:ready' }],
+    labels: [{ name: 'agents-office' }],
     html_url: `https://github.com/${FULL_NAME}/issues/${number}`,
     user: { login: sender },
   },
@@ -333,6 +335,7 @@ beforeAll(async () => {
       githubWebhookSecret: WEBHOOK_SECRET,
       githubWebhookEnabled: true,
       githubApp: { appId: APP_ID, privateKeyPem: pem, apiUrl, allowedUsers: ['toshipy'] },
+      githubLogin: 'toshipy',
       testTimeoutMs: 30_000,
     }),
   );
@@ -386,7 +389,7 @@ describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_0
   });
 
   it('starts a run only from allowed users, pushes an ai/ branch and opens a Draft PR, then handles review and merge', async () => {
-    const auto = await req('PUT', `/v1/projects/${projectId}/automation-policy`, { enabled: true, triggerLabel: 'ai:ready', events: ['issues.opened', 'issues.labeled'], maxRevisionAttempts: 3 });
+    const auto = await req('PUT', `/v1/projects/${projectId}/automation-policy`, { enabled: true, triggerLabel: 'agents-office', events: ['issues.opened', 'issues.labeled'], maxRevisionAttempts: 3 });
     expect(auto.status).toBe(200);
     fake.setScenario({
       plan: [{ output: PLAN }],

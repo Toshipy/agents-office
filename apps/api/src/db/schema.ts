@@ -151,6 +151,8 @@ export interface RunSource {
   deliveryId?: string;
   repositoryId?: number;
   requestedBy?: string;
+  /** 着手時に自分（t.arai）を Issue のアサインにした。終わりや失敗で外す対象 */
+  assignedBySelf?: boolean;
 }
 
 export interface RunPr {

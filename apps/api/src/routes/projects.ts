@@ -231,7 +231,7 @@ export function registerProjectRoutes(app: Hono<AppEnv>, s: Services) {
         projectId: project.id,
         ...values,
         automationEnabled: false, // FR-022: 接続直後は OFF
-        policy: { triggerLabel: 'ai:ready', events: ['issues.opened', 'issues.labeled'], maxRevisionAttempts: 3 },
+        policy: { triggerLabel: 'agents-office', events: ['issues.opened', 'issues.labeled'], maxRevisionAttempts: 3 },
       })
       .returning();
     await audit(s.db, { workspaceId: a.workspaceId, actorUserId: a.userId, action: 'repository.connected', targetType: 'project', targetId: project.id, detail: { fullName: b.fullName, verification: b.verification } });

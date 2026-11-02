@@ -74,7 +74,7 @@ async function setupProject(c: Client, opts: { automation?: boolean; maxRevision
   if (opts.automation !== undefined || opts.maxRevisionAttempts !== undefined) {
     const r = await c.json('PUT', `/v1/projects/${p.body.id}/automation-policy`, {
       enabled: opts.automation ?? false,
-      triggerLabel: 'ai:ready',
+      triggerLabel: 'agents-office',
       events: ['issues.opened', 'issues.labeled'],
       maxRevisionAttempts: opts.maxRevisionAttempts ?? 3,
     });
@@ -264,7 +264,7 @@ describe('AT-004 / AT-005 webhooks', () => {
     const a = await signup('hook');
     const p = await setupProject(a, { automation: true });
     const deliveryId = crypto.randomUUID();
-    const payload = issuePayload(p, 7, ['ai:ready']);
+    const payload = issuePayload(p, 7, ['agents-office']);
 
     const forged = await send('issues', payload, { secret: 'wrong-secret' });
     expect(forged.status).toBe(401);
@@ -298,7 +298,7 @@ describe('AT-004 / AT-005 webhooks', () => {
   it('does not start runs when automation is OFF or label does not match', async () => {
     const a = await signup('off');
     const off = await setupProject(a);
-    await send('issues', issuePayload(off, 1, ['ai:ready']));
+    await send('issues', issuePayload(off, 1, ['agents-office']));
     const on = await setupProject(a, { automation: true });
     await send('issues', issuePayload(on, 2, ['bug']));
     await waitFor(async () => {
@@ -322,7 +322,7 @@ describe('simulator isolation', () => {
     const shared = 'shared-org/shared-repo';
     const a = await setupProject(alice, { automation: true, repo: shared });
     await setupProject(bob, { automation: true, repo: shared });
-    const sent = await alice.json('POST', '/v1/dev/github/simulate', { kind: 'issue', projectId: a.projectId, title: '共有 Repo の Issue', labels: ['ai:ready'] });
+    const sent = await alice.json('POST', '/v1/dev/github/simulate', { kind: 'issue', projectId: a.projectId, title: '共有 Repo の Issue', labels: ['agents-office'] });
     expect(sent.status).toBe(200);
     const byBob = await bob.json('POST', '/v1/dev/github/simulate', { kind: 'redeliver', deliveryId: sent.body.deliveryId });
     expect(byBob.status).toBe(404);

@@ -38,7 +38,7 @@ export const DEMO_ACCOUNTS = [
   { username: 'bob', password: 'bob-local-demo', displayName: 'Bob' },
 ];
 
-const POLICY: RepoPolicy = { triggerLabel: 'ai:ready', events: ['issues.opened', 'issues.labeled'], maxRevisionAttempts: 3 };
+const POLICY: RepoPolicy = { triggerLabel: 'agents-office', events: ['issues.opened', 'issues.labeled'], maxRevisionAttempts: 3 };
 
 async function addProject(
   s: Services,

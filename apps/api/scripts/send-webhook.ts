@@ -1,7 +1,7 @@
 /**
  * 署名付き GitHub Webhook をローカル API に送る CLI（本番と同じ受信経路の確認用）。
  *
- *   pnpm webhook:send -- --repo alice/storefront-web --installation 12345 --title "CSV エクスポート" --label ai:ready
+ *   pnpm webhook:send -- --repo alice/storefront-web --installation 12345 --title "CSV エクスポート" --label agents-office
  *   pnpm webhook:send -- --repo alice/storefront-web --installation 12345 --forge   # 不正署名（401 になる）
  *
  * Installation ID は Projects 画面の Repo 欄に表示されます。
@@ -29,7 +29,7 @@ const payload = {
     number: Number(arg('number', String(Math.floor(Math.random() * 9000) + 1000))),
     title: arg('title', 'CLI から送信した Issue'),
     body: arg('body', 'scripts/send-webhook.ts から送信'),
-    labels: (arg('label', 'ai:ready') ?? '').split(',').filter(Boolean).map((name) => ({ name })),
+    labels: (arg('label', 'agents-office') ?? '').split(',').filter(Boolean).map((name) => ({ name })),
   },
   repository: { id: simulatedRepositoryId(repo), full_name: repo },
   installation: { id: installation },

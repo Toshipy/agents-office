@@ -149,7 +149,7 @@ function CreateProject({ onDone, githubApp }: { onDone(): void; githubApp: boole
 
 function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto; githubApp: boolean; onChange(): void }) {
   const [repo, setRepo] = useState('');
-  const [label, setLabel] = useState(p.repository?.policy.triggerLabel ?? 'ai:ready');
+  const [label, setLabel] = useState(p.repository?.policy.triggerLabel ?? 'agents-office');
   const [maxRev, setMaxRev] = useState(p.repository?.policy.maxRevisionAttempts ?? 3);
   const [sim, setSim] = useState(false);
   const [localPath, setLocalPath] = useState(p.repository?.localPath ?? '');
@@ -170,7 +170,7 @@ function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto;
       () =>
         api.put(`/v1/projects/${p.id}/automation-policy`, {
           enabled,
-          triggerLabel: label.trim() || 'ai:ready',
+          triggerLabel: label.trim() || 'agents-office',
           events: ['issues.opened', 'issues.labeled'],
           maxRevisionAttempts: Number(maxRev),
         }),
@@ -348,7 +348,7 @@ function ProjectCard({ project: p, githubApp, onChange }: { project: ProjectDto;
 function IssueSimulator({ project }: { project: ProjectDto }) {
   const [title, setTitle] = useState('注文履歴を CSV でエクスポートできるようにする');
   const [body, setBody] = useState('管理画面から CSV をダウンロードしたい。Excel で文字化けしないように。');
-  const [labels, setLabels] = useState(project.repository?.policy.triggerLabel ?? 'ai:ready');
+  const [labels, setLabels] = useState(project.repository?.policy.triggerLabel ?? 'agents-office');
   const [last, setLast] = useState<{ deliveryId: string; status: number; body: { status: string; code?: string } } | null>(null);
   const send = async () => {
     try {

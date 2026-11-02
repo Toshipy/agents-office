@@ -27,6 +27,7 @@ import { GithubApp } from './github/app';
 import { GithubRepoHost } from './github/repoHost';
 import { Dispatcher } from './github/dispatcher';
 import { GithubPoller } from './github/poller';
+import { IssueIntake } from './github/issueIntake';
 import { MAX_WEBHOOK_BYTES, receiveGithubWebhook } from './github/webhook';
 import { SeatWatcher } from './services/office';
 import { csrfGuard, requireAuth, type AuthContext } from './auth/session';
@@ -34,6 +35,7 @@ import { registerAuthRoutes } from './routes/auth';
 import { registerWorkspaceRoutes } from './routes/workspace';
 import { registerProjectRoutes } from './routes/projects';
 import { registerRunRoutes } from './routes/runs';
+import { registerIssueRoutes } from './routes/issues';
 import { registerApprovalRoutes } from './routes/approvals';
 import { registerEventRoutes } from './routes/events';
 import { registerDevRoutes } from './routes/dev';
@@ -46,6 +48,7 @@ export interface Services {
   store: ArtifactStore;
   engine: WorkflowEngine;
   dispatcher: Dispatcher;
+  issueIntake: IssueIntake;
   seats: SeatWatcher;
   /** GitHub App 連携（未設定なら null = シミュレーターのみ） */
   github: GithubApp | null;
@@ -102,10 +105,11 @@ export async function createServices(
   const bus = new EventBus(db);
   const store = new ArtifactStore(db, config.dataDir === 'memory' ? 'memory' : config.artifactsDir);
   const engine = new WorkflowEngine(db, bus, store, runner, config);
-  const dispatcher = new Dispatcher(db, bus, engine, github);
+  const issueIntake = new IssueIntake(db, engine, github, config.githubLogin);
+  const dispatcher = new Dispatcher(db, bus, engine, github, issueIntake);
   const seats = new SeatWatcher(db, bus);
   const poller = github ? new GithubPoller(db, github, config.githubPollMs, config.githubLogin) : null;
-  return { db, client, config, bus, store, engine, dispatcher, seats, github, poller };
+  return { db, client, config, bus, store, engine, dispatcher, issueIntake, seats, github, poller };
 }
 
 export function createApp(s: Services) {
@@ -178,6 +182,7 @@ export function createApp(s: Services) {
   registerWorkspaceRoutes(app, s);
   registerProjectRoutes(app, s);
   registerRunRoutes(app, s);
+  registerIssueRoutes(app, s);
   registerApprovalRoutes(app, s);
   registerEventRoutes(app, s);
   if (s.config.enableDevRoutes) registerDevRoutes(app, s);
