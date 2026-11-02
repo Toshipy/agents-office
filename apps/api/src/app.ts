@@ -55,6 +55,8 @@ export interface Services {
   github: GithubApp | null;
   /** GitHub のポーリング（GitHub App 未設定なら null） */
   poller: GithubPoller | null;
+  /** Tester の実行場所（起動時・Run の終わりに残ったコンテナを片付ける） */
+  testSandbox: TestSandbox;
 }
 
 export type AppEnv = {
@@ -66,7 +68,7 @@ export type AppEnv = {
 
 export async function createServices(
   config: AppConfig,
-  opts: { runner?: AgentRunner; claudeClient?: ClaudeMessagesClient; githubFetch?: typeof fetch } = {},
+  opts: { runner?: AgentRunner; claudeClient?: ClaudeMessagesClient; githubFetch?: typeof fetch; testSandbox?: TestSandbox } = {},
 ): Promise<Services> {
   setLogLevel(config.logLevel);
   const github = config.githubApp ? new GithubApp(config.githubApp, opts.githubFetch) : null;
@@ -74,7 +76,7 @@ export async function createServices(
     log.warn('PAW_GITHUB_ALLOWED_USERS が未設定のため、GitHub の Issue・レビューからは Run を起動しません');
   }
   const remoteHost = github ? new GithubRepoHost(github, config.dataRoot, config.githubLogin) : null;
-  const testSandbox: TestSandbox = config.testSandbox === 'docker' ? new DockerSandbox({ network: config.testNetwork, defaultImage: config.testImage }) : new HostSandbox();
+  const testSandbox: TestSandbox = opts.testSandbox ?? (config.testSandbox === 'docker' ? new DockerSandbox({ network: config.testNetwork, defaultImage: config.testImage }) : new HostSandbox());
   const common = { worktreesDir: config.worktreesDir, testTimeoutMs: config.testTimeoutMs, testSandbox, remoteHost };
   const runner =
     opts.runner ??
@@ -100,7 +102,11 @@ export async function createServices(
               })
             : null,
       },
-      (runId, localRepoPath, branch) => removeWorktree(localRepoPath, resolve(config.worktreesDir, runId), branch).catch(() => undefined),
+      async (runId, localRepoPath, branch) => {
+        // worktree を消す前に、その Run のコンテナを消す（残ったコンテナが worktree を書き換え続けないように）
+        await testSandbox.removeRunContainers?.(runId).catch((err) => log.warn('test container cleanup failed', { runId, err: String(err) }));
+        await removeWorktree(localRepoPath, resolve(config.worktreesDir, runId), branch).catch(() => undefined);
+      },
     );
   const { db, client } = await openDb(config.dataDir);
   const bus = new EventBus(db);
@@ -111,7 +117,26 @@ export async function createServices(
   const dispatcher = new Dispatcher(db, bus, engine, github, issueIntake);
   const seats = new SeatWatcher(db, bus);
   const poller = github ? new GithubPoller(db, github, config.githubPollMs, config.githubLogin) : null;
-  return { db, client, config, bus, store, engine, dispatcher, issueIntake, seats, github, poller };
+  return { db, client, config, bus, store, engine, dispatcher, issueIntake, seats, github, poller, testSandbox };
+}
+
+/**
+ * 常駐の処理（エンジン・Dispatcher・ポーリング・席）を動かす。
+ * エンジンが Run を復旧する前に、前のプロセスが残した Tester のコンテナを消す
+ * （再起動・更新で止めきれなかったコンテナが、復旧した試行と同じ worktree を書き換えないように）
+ */
+export async function startServices(s: Services) {
+  try {
+    const removed = (await s.testSandbox.removeAllContainers?.()) ?? [];
+    if (removed.length > 0) log.info('removed leftover test containers', { count: removed.length });
+  } catch (err) {
+    // Docker が使えなければ、テストの工程が TEST_SANDBOX_UNAVAILABLE で失敗する。起動は止めない
+    log.warn('leftover test container cleanup failed', { err: String(err) });
+  }
+  await s.engine.start();
+  s.dispatcher.start();
+  s.poller?.start();
+  s.seats.start();
 }
 
 export function createApp(s: Services) {

@@ -1,8 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DockerSandbox, HostSandbox, type SandboxResult } from './agents/claude/testSandbox';
+import { DockerSandbox, HostSandbox, type SandboxResult, type TestSandbox } from './agents/claude/testSandbox';
+import { loadConfig } from './config';
+import { createApp, createServices, startServices } from './app';
+import { repositoryBindings, workspaces } from './db/schema';
 
 const ok: SandboxResult = { code: 0, stdout: 'ok', stderr: '', timedOut: false };
 const base = { worktree: '/var/lib/paw/worktrees/run_a', timeoutMs: 1000, image: null, runId: 'run_a', attempt: 1 };
@@ -126,6 +129,124 @@ describe('DockerSandbox', () => {
       return { code: 1, stdout: '', stderr: 'daemon busy', timedOut: false };
     }).exec('t', [], { ...base, signal: sig() });
     expect(calls.filter((c) => c[0] === 'rm')).toHaveLength(2);
+  });
+});
+
+describe('残ったコンテナの片付け', () => {
+  /** docker ps -a の結果を返し、rm -f の対象を記録する偽の docker */
+  function withContainers(names: string[]) {
+    const calls: string[][] = [];
+    const sb = sandbox(async (a) => {
+      calls.push(a);
+      if (a[0] === 'ps') return { code: 0, stdout: `${names.join('\n')}\n`, stderr: '', timedOut: false };
+      return ok;
+    });
+    const removed = () => calls.filter((c) => c[0] === 'rm').map((c) => c[2]);
+    return { sb, calls, removed };
+  }
+
+  it('起動時は paw-test- で始まるコンテナをすべて消し、他のコンテナには触らない', async () => {
+    const { sb, calls, removed } = withContainers(['paw-test-run_a-1-0a0b0c0d', 'paw-test-run_b-2-11223344', 'my-paw-test-db', 'postgres']);
+    expect(await sb.removeAllContainers()).toEqual(['paw-test-run_a-1-0a0b0c0d', 'paw-test-run_b-2-11223344']);
+    expect(calls[0]).toEqual(['ps', '-a', '--filter', 'name=paw-test-', '--format', '{{.Names}}']);
+    expect(removed()).toEqual(['paw-test-run_a-1-0a0b0c0d', 'paw-test-run_b-2-11223344']);
+  });
+
+  it('Run の片付けではその Run のコンテナだけを消す（runId の前方一致で別の Run を巻き込まない）', async () => {
+    const { sb, removed } = withContainers(['paw-test-run_a-1-0a0b0c0d', 'paw-test-run_a-3-99887766', 'paw-test-run_ab-1-55667788', 'paw-test-run_b-1-12345678']);
+    await sb.removeRunContainers('run_a');
+    expect(removed()).toEqual(['paw-test-run_a-1-0a0b0c0d', 'paw-test-run_a-3-99887766']);
+  });
+
+  it('docker を呼べなければ TEST_SANDBOX_UNAVAILABLE', async () => {
+    const sb = sandbox(async () => {
+      throw Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' });
+    });
+    await expect(sb.removeAllContainers()).rejects.toMatchObject({ code: 'TEST_SANDBOX_UNAVAILABLE' });
+  });
+
+  /** 片付けの呼び出しを記録する偽の Tester の実行場所 */
+  function fakeSandbox(order: string[]): TestSandbox & { removeAllContainers: ReturnType<typeof vi.fn>; removeRunContainers: ReturnType<typeof vi.fn> } {
+    return {
+      exec: async () => ok,
+      removeAllContainers: vi.fn(async () => (order.push('removeAllContainers'), [])),
+      removeRunContainers: vi.fn(async (runId: string) => (order.push(`removeRunContainers:${runId}`), [])),
+    };
+  }
+
+  it('startServices はエンジンが Run を復旧する前に、残ったコンテナを消す', async () => {
+    const order: string[] = [];
+    const testSandbox = fakeSandbox(order);
+    const s = await createServices(loadConfig({ dataDir: 'memory', simSpeed: 0, seedDemo: false, logLevel: 'silent' }), { testSandbox });
+    const start = s.engine.start.bind(s.engine);
+    vi.spyOn(s.engine, 'start').mockImplementation(async () => {
+      order.push('engine.start');
+      await start();
+    });
+    try {
+      await startServices(s);
+      expect(order).toEqual(['removeAllContainers', 'engine.start']);
+    } finally {
+      await s.poller?.stop();
+      s.dispatcher.stop();
+      s.seats.stop();
+      await s.engine.stop();
+      await s.client.close();
+    }
+  });
+
+  it('Docker が使えなくても起動は止めない', async () => {
+    const testSandbox = fakeSandbox([]);
+    testSandbox.removeAllContainers.mockRejectedValueOnce(new Error('docker down'));
+    const s = await createServices(loadConfig({ dataDir: 'memory', simSpeed: 0, seedDemo: false, logLevel: 'silent' }), { testSandbox });
+    try {
+      await expect(startServices(s)).resolves.toBeUndefined();
+      expect(s.engine.inflightCount()).toBe(0);
+    } finally {
+      s.dispatcher.stop();
+      s.seats.stop();
+      await s.engine.stop();
+      await s.client.close();
+    }
+  });
+
+  it('Claude の Run が終わると、その Run のコンテナを消す', async () => {
+    const order: string[] = [];
+    const testSandbox = fakeSandbox(order);
+    const s = await createServices(
+      loadConfig({ dataDir: 'memory', simSpeed: 0, seedDemo: false, logLevel: 'silent', agentRuntimeMode: 'claude_code', agentRuntime: 'claude_code' }),
+      { testSandbox },
+    );
+    try {
+      const app = createApp(s);
+      const headers = { 'content-type': 'application/json', 'x-paw-client': 'web' };
+      const r = await app.request('/v1/auth/signup', { method: 'POST', headers, body: JSON.stringify({ username: 'owner', displayName: 'Owner', password: 'password-1234' }) });
+      const cookie = r.headers.get('set-cookie')!.split(';')[0];
+      const p = await app.request('/v1/projects', { method: 'POST', headers: { ...headers, cookie }, body: JSON.stringify({ name: 'Demo', color: '#38e1ff' }) });
+      const projectId = ((await p.json()) as { id: string }).id;
+      const [ws] = await s.db.select().from(workspaces);
+      const dir = mkdtempSync(join(tmpdir(), 'paw-sbx-run-'));
+      await s.db.insert(repositoryBindings).values({
+        id: 'rb_sbx',
+        workspaceId: ws.id,
+        projectId,
+        installationId: 0,
+        repositoryId: 1,
+        fullName: 'local/sbx',
+        automationEnabled: false,
+        verification: 'simulated',
+        localPath: dir,
+        policy: { triggerLabel: 'agents-office', events: ['issues.labeled'], maxRevisionAttempts: 3 },
+      } as typeof repositoryBindings.$inferInsert);
+      const run = await s.engine.createRun({ workspaceId: ws.id, projectId, title: 't', request: 'r', source: { type: 'manual' } as never, maxRevisionAttempts: 3, budgetLimitUsd: 1, runtime: 'claude_code' });
+      await s.engine.transition(run.id, 'planning');
+      await s.engine.failRun(run.id, 'TEST_FAILURE', '失敗させた');
+      for (let i = 0; i < 100 && testSandbox.removeRunContainers.mock.calls.length === 0; i++) await new Promise((res) => setTimeout(res, 10));
+      expect(order).toEqual([`removeRunContainers:${run.id}`]);
+    } finally {
+      await s.engine.stop();
+      await s.client.close();
+    }
   });
 });
 

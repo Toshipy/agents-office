@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { loadConfig, REPO_ROOT } from './config';
-import { createApp, createServices } from './app';
+import { createApp, createServices, startServices } from './app';
 import { DemoTraffic } from './demo/traffic';
 import { log, setLogLevel } from './lib/logger';
 import { seedIfEmpty } from './seed';
@@ -25,10 +25,7 @@ async function main() {
   const services = await createServices(config);
   const app = createApp(services);
   if (config.seedDemo) await seedIfEmpty(services);
-  await services.engine.start();
-  services.dispatcher.start();
-  services.poller?.start();
-  services.seats.start();
+  await startServices(services);
   const demo = new DemoTraffic(services);
   if (config.enableDevRoutes) demo.start();
 

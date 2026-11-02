@@ -32,6 +32,21 @@ export interface TestSandboxExecOptions {
 
 export interface TestSandbox {
   exec(cmd: string, args: string[], opts: TestSandboxExecOptions): Promise<SandboxResult>;
+  /**
+   * 前のプロセスが残したコンテナ（名前が paw-test- で始まるもの）をすべて消す。起動時、エンジンを動かす前に呼ぶ。
+   * 再起動・更新で止めきれなかったコンテナが、次の試行と同じ worktree を書き換え続けないようにするため
+   */
+  removeAllContainers?(): Promise<string[]>;
+  /** その Run のコンテナ（paw-test-<runId>-）をすべて消す。Run の終わりの片付けで呼ぶ */
+  removeRunContainers?(runId: string): Promise<string[]>;
+}
+
+/** コンテナ名の先頭（すべての Tester のコンテナに共通） */
+export const CONTAINER_PREFIX = 'paw-test-';
+
+/** その Run のコンテナ名の先頭。runId の後ろに - を付け、別の Run（run_a と run_ab）を巻き込まない */
+export function runContainerPrefix(runId: string): string {
+  return `${CONTAINER_PREFIX}${runId.replace(/[^A-Za-z0-9_.-]/g, '_')}-`;
 }
 
 export class HostSandbox implements TestSandbox {
@@ -105,7 +120,7 @@ export class DockerSandbox implements TestSandbox {
     // --mount の値はカンマ区切りなので、これらを含むパスはオプションの差し込みになり得る
     if (/[,"\n\r]/.test(o.worktree)) throw unavailable('worktree のパスに使えない文字が含まれているため、コンテナを起動しません');
     // 前回の残りと名前が衝突しないよう、ランダムな接尾辞を付ける
-    const name = `paw-test-${o.runId.replace(/[^A-Za-z0-9_.-]/g, '_')}-${o.attempt}-${randomBytes(4).toString('hex')}`;
+    const name = `${runContainerPrefix(o.runId)}${o.attempt}-${randomBytes(4).toString('hex')}`;
     // API プロセスと同じ uid:gid で動かし、worktree に書いたファイルの所有者を API ユーザーのままにする
     const user = typeof process.getuid === 'function' && typeof process.getgid === 'function' ? ['--user', `${process.getuid()}:${process.getgid()}`] : [];
     const lim = this.opts.limits ?? {};
@@ -131,13 +146,7 @@ export class DockerSandbox implements TestSandbox {
     ];
 
     // docker CLI を殺してもコンテナは残るため、コンテナ名で強制削除する（SIGKILL）
-    const remove = async () => {
-      for (let i = 0; i < 2; i++) {
-        const r = await this.spawnDocker(['rm', '-f', name], { timeoutMs: 15_000 }).catch(() => null);
-        if (r && (r.code === 0 || /No such container/i.test(r.stderr))) return;
-        await new Promise((res) => setTimeout(res, 300));
-      }
-    };
+    const remove = () => this.removeContainer(name);
     const onAbort = () => void remove();
     o.signal.addEventListener('abort', onAbort, { once: true });
     let normal = false;
@@ -158,6 +167,40 @@ export class DockerSandbox implements TestSandbox {
       o.signal.removeEventListener('abort', onAbort);
       // 正常終了なら --rm で消えている。それ以外（タイムアウト・中止・起動失敗）は残りを確実に消す
       if (!normal) await remove();
+    }
+  }
+
+  async removeAllContainers(): Promise<string[]> {
+    return this.removeByPrefix(CONTAINER_PREFIX);
+  }
+
+  async removeRunContainers(runId: string): Promise<string[]> {
+    return this.removeByPrefix(runContainerPrefix(runId));
+  }
+
+  /** 名前が prefix で始まるコンテナを（止まっているものも含めて）強制削除し、消した名前を返す */
+  private async removeByPrefix(prefix: string): Promise<string[]> {
+    let r: SandboxResult;
+    try {
+      // name フィルタは部分一致なので、先頭一致は結果の側で確かめる
+      r = await this.spawnDocker(['ps', '-a', '--filter', `name=${prefix}`, '--format', '{{.Names}}'], { timeoutMs: 30_000 });
+    } catch (err) {
+      throw unavailable(`Docker のコンテナ一覧を取得できません: ${(err as Error).message}`);
+    }
+    if (r.code !== 0) throw unavailable(`Docker のコンテナ一覧を取得できません: ${r.stderr.trim().slice(-300)}`);
+    const names = r.stdout
+      .split('\n')
+      .map((n) => n.trim())
+      .filter((n) => n.startsWith(prefix));
+    for (const n of names) await this.removeContainer(n);
+    return names;
+  }
+
+  private async removeContainer(name: string): Promise<void> {
+    for (let i = 0; i < 2; i++) {
+      const r = await this.spawnDocker(['rm', '-f', name], { timeoutMs: 15_000 }).catch(() => null);
+      if (r && (r.code === 0 || /No such container/i.test(r.stderr))) return;
+      await new Promise((res) => setTimeout(res, 300));
     }
   }
 }
