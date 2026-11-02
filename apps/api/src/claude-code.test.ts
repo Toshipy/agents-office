@@ -328,6 +328,33 @@ describe('Claude Code cancel waits for exit', () => {
   });
 });
 
+describe('Claude Code kill switch', () => {
+  it('実行中の Run が複数あっても、CLI の終了を直列に待たず同時に止める', async () => {
+    const p2 = (await req('POST', '/v1/projects', { name: 'Local2', color: '#38e1ff' })).body.id as string;
+    await req('POST', `/v1/projects/${p2}/repositories`, { fullName: 'me/local-repo2' });
+    expect((await req('PUT', `/v1/projects/${p2}/local-repo`, { localPath: repo, testCommand: 'git status --short' })).status).toBe(200);
+    const slowMs = 2000;
+    setScenario({ plan: [{ kind: 'slow_exit', slowExitMs: slowMs }] });
+    const r1 = await startRun();
+    const created = await req('POST', '/v1/runs', { projectId: p2, request: '別の変更' });
+    expect(created.status).toBe(202);
+    await waitFor(async () => calls().length >= 2);
+    await new Promise((r) => setTimeout(r, 200)); // SIGINT ハンドラの登録を待つ
+    const t0 = Date.now();
+    const k = await req('POST', '/v1/workspaces/me/kill-switch', { action: 'pause', cancelActive: true });
+    const elapsed = Date.now() - t0;
+    expect(k.status).toBe(200);
+    expect(k.body.cancelled).toBeGreaterThanOrEqual(2);
+    // 直列なら 2 × slowMs 以上かかる
+    expect(elapsed).toBeLessThan(slowMs * 1.8);
+    for (const c of calls()) {
+      expect(() => process.kill(c.pid, 0)).toThrow();
+    }
+    expect((await runRow(r1)).status).toBe('cancelled');
+    await req('POST', '/v1/workspaces/me/kill-switch', { action: 'resume', cancelActive: false });
+  });
+});
+
 describe('Claude Code detection and errors', () => {
   const ctx = (signal = new AbortController().signal) =>
     ({
