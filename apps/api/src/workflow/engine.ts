@@ -902,8 +902,8 @@ export class WorkflowEngine {
           await this.failRun(run.id, 'INVALID_PLAN', '計画の構造検証に失敗しました');
           return;
         }
-        // 資料に振り分けられるのは GitHub App で接続した Repo の Issue だけ。前の資料の後に人のコメントがあれば実装に進む
-        const materials = o.mode === 'materials' && run.source.modeFromComments !== 'implement' && (await this.materialsAllowed(run));
+        // 資料に振り分けられるのは GitHub App で接続した Repo の、PR がまだ無い Issue の Run だけ。前の資料の後に人のコメントがあれば実装に進む
+        const materials = o.mode === 'materials' && !run.pr && run.source.modeFromComments !== 'implement' && (await this.materialsAllowed(run));
         const r = await this.transition(run.id, 'running', { plan: parsed.data as PlanJson });
         if (r) await (materials ? this.addStep(r, 'materials', 'planner', r.revisionCount) : this.addStep(r, 'implement', 'developer', r.revisionCount));
         return;

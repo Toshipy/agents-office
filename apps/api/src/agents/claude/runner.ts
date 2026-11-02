@@ -172,8 +172,8 @@ export class ClaudeRunner implements AgentRunner {
         .join('\n\n'),
     });
 
-    // 資料に振り分けられるのは GitHub App で接続した Repo の Issue だけ。前の資料の後に人のコメントがあれば実装に進む
-    const materialsAllowed = Boolean(ctx.remote && ctx.issueNumber) && ctx.modeFromComments !== 'implement';
+    // 資料に振り分けられるのは GitHub App で接続した Repo の、PR がまだ無い Issue の Run だけ。前の資料の後に人のコメントがあれば実装に進む
+    const materialsAllowed = Boolean(ctx.remote && ctx.issueNumber) && !ctx.pr && ctx.modeFromComments !== 'implement';
     const mode: 'implement' | 'materials' = plan.mode === 'materials' && materialsAllowed ? 'materials' : 'implement';
     // 危険操作の判定はモデルの出力だけに頼らず、プログラムの検査も併用する（NFR-009）
     const detected = Array.from(new Set([...detectDangerous(`${ctx.title}\n${ctx.request}`), ...plan.dangerous_operations]));
@@ -212,7 +212,7 @@ export class ClaudeRunner implements AgentRunner {
           ];
     const modeNote =
       plan.mode === 'materials' && mode === 'implement'
-        ? `${plan.mode_reason}（${ctx.modeFromComments === 'implement' ? '前の資料の後に人のコメントがあるため実装として進めます' : 'GitHub の Issue の無い Run のため実装として進めます'}）`
+        ? `${plan.mode_reason}（${ctx.pr ? 'PR を出した後の Run のため実装として進めます' : ctx.modeFromComments === 'implement' ? '前の資料の後に人のコメントがあるため実装として進めます' : 'GitHub の Issue の無い Run のため実装として進めます'}）`
         : plan.mode_reason;
     const md = [
       `# 実行計画 — ${ctx.title}`,
