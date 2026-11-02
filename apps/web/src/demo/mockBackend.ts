@@ -140,8 +140,11 @@ const TOKENS: Record<StepKey, [number, number]> = {
   review: [8200, 1500],
   draft_pr: [0, 0],
   update_pr: [0, 0],
+  // 資料モードはデモでは使わない（型を満たすため）
+  materials: [4200, 1500],
+  post_materials: [0, 0],
 };
-const DURATION: Record<StepKey, number> = { plan: 6500, implement: 11000, test: 7500, review: 6500, draft_pr: 2600, update_pr: 2400 };
+const DURATION: Record<StepKey, number> = { plan: 6500, implement: 11000, test: 7500, review: 6500, draft_pr: 2600, update_pr: 2400, materials: 6500, post_materials: 2000 };
 
 let idSeq = 0;
 const nid = (p: string) => `${p}_${(++idSeq).toString(36).padStart(4, '0')}${Math.random().toString(36).slice(2, 8)}`;

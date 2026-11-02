@@ -10,12 +10,13 @@ import { projects, repositoryBindings, runs, workspaces, type RunSource } from '
 import { AppError } from '../lib/errors';
 import type { WorkflowEngine } from '../workflow/engine';
 import type { GithubApp, GithubComment, GithubIssue } from './app';
-import { AGENTS_OFFICE_LABEL } from './labels';
+import { decideFromComments } from '../agents/claude/materials';
+import { AGENTS_OFFICE_LABEL, NEEDS_HUMAN_LABEL } from './labels';
 
 type Binding = typeof repositoryBindings.$inferSelect;
 
 export const NIGHTLY_LABEL = 'nightly-ok';
-export const NEEDS_HUMAN_LABEL = 'needs-human';
+export { NEEDS_HUMAN_LABEL };
 
 export type IssueRow = GithubIssue & { runId: string | null; skipReason: string | null };
 
@@ -198,6 +199,8 @@ export class IssueIntake {
     const body = issue?.body ?? opts.payload?.body ?? '';
     const url = issue?.htmlUrl ?? opts.payload?.htmlUrl;
     const guidance = opts.guidance?.trim();
+    // 前の資料の後に人のコメントがあれば、会議で決まったものとして実装に振り分ける（計画の mode より優先）
+    const modeFromComments = decideFromComments(comments);
     const source: RunSource = {
       type: 'github_issue',
       issueNumber,
@@ -207,6 +210,7 @@ export class IssueIntake {
       ...(assignedBySelf ? { assignedBySelf: true } : {}),
       // 画面で添えた指示は run.guidance ではなく別の入れ物に入れる（停止の判定を外さないため）
       ...(guidance ? { delegateGuidance: guidance } : {}),
+      ...(modeFromComments ? { modeFromComments } : {}),
     };
     const run = await this.engine.createRun({
       workspaceId: ws.id,

@@ -11,20 +11,22 @@
  *  - Tester: 利用者が Project に設定したコマンドだけを worktree で実行（シェルは使わない）
  *  - PR: 人の publish 承認の後にだけ push・PR 作成を行う。承認した head と worktree の HEAD が違えば何もしない
  *    （GitHub App 連携のない Repo は worktree のブランチを PR とみなす）
+ *  - 資料モード: 人が決める Issue は、コードを変えずに判断材料（Markdown）を書き、publish 承認の後に Issue コメントにする
  *
  * 依頼本文・Issue・リポジトリ内容は非信頼入力として扱い、ツールポリシーは変更しない（基本設計書 9.3）。
  */
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { PATTERNS, detectDangerous } from '@paw/sim-content';
-import type { AgentRunner, PublishPreview, StepExecutionContext, StepOutput } from '../runner';
+import type { AgentRunner, MaterialsPreview, PublishPreview, StepExecutionContext, StepOutput } from '../runner';
 import { PublishStaleError, RunnerError } from '../runner';
 import { sha256Hex } from '../../lib/crypto';
-import { assertGitLink, changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, worktreeExists, type Worktree } from './git';
+import { assertGitLink, changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, resetToBase, worktreeExists, type Worktree } from './git';
 import type { RemoteRepoHost } from '../../github/repoHost';
 import type { ModelBackend } from './shared';
 import type { TestSandbox } from './testSandbox';
-import { DEVELOPER_SYSTEM, PLANNER_SYSTEM, PlanOutput, REVIEWER_SYSTEM, ReviewOutput, bullet } from './shared';
+import { DEVELOPER_SYSTEM, MATERIALS_SYSTEM, MaterialsOutput, PLANNER_SYSTEM, PlanOutput, REVIEWER_SYSTEM, ReviewOutput, bullet } from './shared';
+import { designDecisionOf, materialsCommentBody, validateMaterials } from './materials';
 
 const MAX_DIFF_FOR_REVIEW = 200 * 1024;
 
@@ -96,6 +98,8 @@ export class ClaudeRunner implements AgentRunner {
 
   private async executeInner(ctx: StepExecutionContext): Promise<StepOutput> {
     if (!ctx.localRepo) throw new RunnerError('Claude 実行にはローカルリポジトリの設定が必要です', 'LOCAL_REPO_MISSING', false);
+    // Issue への書き込みだけの工程なので、作業コピーは使わない
+    if (ctx.key === 'post_materials') return this.postMaterials(ctx);
     let baseRef: string | undefined;
     if (ctx.remote) {
       if (!this.opts.remoteHost) throw new RunnerError('GitHub App が設定されていないため、このリポジトリでは実行できません', 'GITHUB_APP_UNAVAILABLE', false);
@@ -115,6 +119,8 @@ export class ClaudeRunner implements AgentRunner {
       case 'draft_pr':
       case 'update_pr':
         return this.pullRequest(ctx, wt);
+      case 'materials':
+        return this.materials(ctx, wt);
     }
   }
 
@@ -166,6 +172,9 @@ export class ClaudeRunner implements AgentRunner {
         .join('\n\n'),
     });
 
+    // 資料に振り分けられるのは GitHub App で接続した Repo の Issue だけ。前の資料の後に人のコメントがあれば実装に進む
+    const materialsAllowed = Boolean(ctx.remote && ctx.issueNumber) && ctx.modeFromComments !== 'implement';
+    const mode: 'implement' | 'materials' = plan.mode === 'materials' && materialsAllowed ? 'materials' : 'implement';
     // 危険操作の判定はモデルの出力だけに頼らず、プログラムの検査も併用する（NFR-009）
     const detected = Array.from(new Set([...detectDangerous(`${ctx.title}\n${ctx.request}`), ...plan.dangerous_operations]));
     const flags: string[] = [];
@@ -178,7 +187,8 @@ export class ClaudeRunner implements AgentRunner {
         outcome: { needsInput: true, reason: 'dangerous_operation', detected, questions: plan.questions.length ? plan.questions : ['危険な操作を除外した安全な範囲で進めてよいですか？'] },
       };
     }
-    if (!ctx.guidance && plan.needs_human_decision && plan.questions.length > 0) {
+    // 資料は人が決めるための材料なので、要件の曖昧さでは止めない（曖昧さは会議で確かめる問いになる）
+    if (!ctx.guidance && mode === 'implement' && plan.needs_human_decision && plan.questions.length > 0) {
       await ctx.log('要件が曖昧なため判断を求めます', 'error');
       return {
         status: 'succeeded',
@@ -186,13 +196,24 @@ export class ClaudeRunner implements AgentRunner {
         outcome: { needsInput: true, reason: 'clarification', questions: plan.questions, detected: [] },
       };
     }
-    const steps = [
-      { id: 'plan', role: 'planner' as const, dependsOn: [] },
-      { id: 'implement', role: 'developer' as const, dependsOn: ['plan'] },
-      { id: 'test', role: 'tester' as const, dependsOn: ['implement'] },
-      { id: 'review', role: 'reviewer' as const, dependsOn: ['test'] },
-      { id: 'draft_pr', role: 'tool_broker' as const, dependsOn: ['review'] },
-    ];
+    const steps =
+      mode === 'materials'
+        ? [
+            { id: 'plan', role: 'planner' as const, dependsOn: [] },
+            { id: 'materials', role: 'planner' as const, dependsOn: ['plan'] },
+            { id: 'post_materials', role: 'tool_broker' as const, dependsOn: ['materials'] },
+          ]
+        : [
+            { id: 'plan', role: 'planner' as const, dependsOn: [] },
+            { id: 'implement', role: 'developer' as const, dependsOn: ['plan'] },
+            { id: 'test', role: 'tester' as const, dependsOn: ['implement'] },
+            { id: 'review', role: 'reviewer' as const, dependsOn: ['test'] },
+            { id: 'draft_pr', role: 'tool_broker' as const, dependsOn: ['review'] },
+          ];
+    const modeNote =
+      plan.mode === 'materials' && mode === 'implement'
+        ? `${plan.mode_reason}（${ctx.modeFromComments === 'implement' ? '前の資料の後に人のコメントがあるため実装として進めます' : 'GitHub の Issue の無い Run のため実装として進めます'}）`
+        : plan.mode_reason;
     const md = [
       `# 実行計画 — ${ctx.title}`,
       '',
@@ -201,6 +222,10 @@ export class ClaudeRunner implements AgentRunner {
       '## 概要',
       '',
       plan.summary,
+      '',
+      '## 振り分け',
+      '',
+      `${mode === 'materials' ? '資料（コードは変えず、判断材料を Issue コメントに書く）' : '実装'} — ${modeNote}`,
       '',
       ...(ctx.guidance ? ['## 人からの追加指示', '', `> ${ctx.guidance}`, ''] : []),
       ...(ctx.extraInstruction ? ['## 任せるときの追加指示', '', `> ${ctx.extraInstruction}`, ''] : []),
@@ -232,7 +257,7 @@ export class ClaudeRunner implements AgentRunner {
     return {
       status: 'succeeded',
       summary: plan.summary.slice(0, 200),
-      outcome: { plan: { steps, maxRevisionAttempts: 3, summary: plan.summary.slice(0, 500), flags }, detail: plan },
+      outcome: { plan: { steps, maxRevisionAttempts: 3, summary: plan.summary.slice(0, 500), flags }, detail: plan, mode },
     };
   }
 
@@ -266,6 +291,8 @@ export class ClaudeRunner implements AgentRunner {
     });
     // AI が作業ツリーの .git を書き換えていないことを確かめてから、git 操作に進む
     await assertGitLink(wt);
+    const decision = designDecisionOf(summary);
+    if (decision) return this.stopForDesignDecision(ctx, wt, decision, `Developer: ${decision}`);
     await this.verifyChanges(ctx, wt);
     const sha = await commitAll(wt, `${ctx.title}\n\nrun: ${ctx.runId} (revision ${ctx.revision})`);
     await ctx.log(sha ? `コミット作成: ${sha.slice(0, 7)} on ${ctx.branch}` : '変更はありませんでした', sha ? 'log' : 'error');
@@ -376,7 +403,8 @@ export class ClaudeRunner implements AgentRunner {
         .join('\n\n'),
     });
     const blockers = diff.files.length === 0 ? ['変更がありません', ...review.blockers] : review.blockers;
-    const approved = review.verdict === 'ready_for_draft_pr' && blockers.length === 0;
+    const needsDesignDecision = review.needs_design_decision === true;
+    const approved = !needsDesignDecision && review.verdict === 'ready_for_draft_pr' && blockers.length === 0;
     const md = [
       `# レビュー結果 — ${ctx.title}`,
       '',
@@ -396,11 +424,16 @@ export class ClaudeRunner implements AgentRunner {
       '',
       '## 判定',
       '',
-      approved ? 'PR として提出可能です。マージ可否は人間がレビューで判断します。' : '修正が必要です。Developer に差し戻します。',
+      needsDesignDecision
+        ? '人が決める設計の判断が必要です。変更を捨てて、判断材料を書く工程に切り替えます。'
+        : approved
+          ? 'PR として提出可能です。マージ可否は人間がレビューで判断します。'
+          : '修正が必要です。Developer に差し戻します。',
       '',
     ].join('\n');
     await ctx.tool('review.write', {}, approved ? `指摘: blocker 0 / nit ${review.nits.length}` : `blocker ${blockers.length} 件`);
     await ctx.artifact('review', 'AI レビュー', 'review.md', 'text/markdown', md);
+    if (needsDesignDecision) return this.stopForDesignDecision(ctx, wt, review.summary, `Reviewer: ${review.summary}`);
     // 通ったときは、エンジンが publish 承認に載せる PR の中身（head・差分のハッシュ・タイトル・本文）を返す
     const publish = approved ? await this.publishPreview(ctx, wt, review.summary) : undefined;
     return {
@@ -425,6 +458,116 @@ export class ClaudeRunner implements AgentRunner {
         filesChanged: diff.files.length,
         runId: ctx.runId,
       }),
+    };
+  }
+
+  /**
+   * 設計の判断が要ると分かった: この Run の変更を捨て、判断を待つ結果を返す（次をどうするかはエンジンが決める）。
+   * まだ GitHub に出していない Run は起点まで戻す（資料の「現状」を AI の途中の変更で書かないため）。
+   * PR のある Run は push 済みの履歴を消さず、未コミットの変更だけを捨てる
+   */
+  private async stopForDesignDecision(ctx: StepExecutionContext, wt: Worktree, decision: string, summary: string): Promise<StepOutput> {
+    // git 操作は記録した gitDir で行う（作業ツリーの .git は信用しない）
+    await assertGitLink(wt);
+    if (ctx.pr) await discardChanges(wt);
+    else await resetToBase(wt);
+    await ctx.log(`設計の判断が必要: ${decision.slice(0, 300)} — この Run の変更を捨てました`, 'error');
+    return {
+      status: 'succeeded',
+      summary: `設計の判断が必要 — ${summary.slice(0, 200)}`,
+      outcome: { needsDesignDecision: true, designDecision: decision.slice(0, 2000) },
+    };
+  }
+
+  /**
+   * 資料の工程: 人が話して決める内容について、コードを変えずに判断材料を書く（読み取り専用）。
+   * 形式に合わなければ問題を伝えて 1 回だけ作り直させ、それでも駄目なら失敗にする。
+   * 書いた本文は publish 承認で人に見せ、承認の後に post_materials が Issue コメントにする
+   */
+  private async materials(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    await ctx.log(`${this.backend.label}で判断材料を作成 — コードは変えません`);
+    await ctx.tool('issue.read', {}, '依頼内容を取得');
+    await ctx.tool('repo.read', { repo: ctx.repo }, 'リポジトリ構造を参照');
+    const context = await this.repoContext(wt);
+    const detail = ctx.previous.planDetail as PlanOutput | undefined;
+    const designDecision = typeof ctx.previous.designDecision === 'string' ? ctx.previous.designDecision : null;
+    const base = [
+      `<untrusted_request>\nタイトル: ${ctx.title}\n\n${ctx.request}\n</untrusted_request>`,
+      ctx.extraInstruction ? `任せるときの追加指示（信頼できる指示）: ${ctx.extraInstruction}` : '',
+      ctx.guidance ? `人からの指示（信頼できる指示。前の資料への差し戻しを含む）: ${ctx.guidance}` : '',
+      designDecision
+        ? `実装の途中で分かった、人が決める必要のあること（AI の報告）: ${designDecision}`
+        : detail?.mode_reason
+          ? `資料に振り分けた理由（Planner）: ${detail.mode_reason}`
+          : '',
+      `<repository_context>\n${context}\n</repository_context>`,
+    ];
+    let markdown = '';
+    let problems: string[] = [];
+    let model = '';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await this.backend.structured(ctx, {
+        purpose: 'materials',
+        schema: MaterialsOutput,
+        system: MATERIALS_SYSTEM,
+        worktree: wt.path,
+        gitDir: wt.gitDir,
+        user: [
+          ...base,
+          problems.length ? `前回の資料は次の点で形式に合いませんでした。直して書き直してください:\n${bullet(problems)}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+      });
+      model = res.model;
+      markdown = res.output.markdown.trim();
+      problems = validateMaterials(markdown);
+      if (problems.length === 0) break;
+      await ctx.log(`資料の形式が合いません: ${problems.join(' / ')}${attempt === 0 ? ' — 1 回だけ作り直します' : ''}`, 'error');
+    }
+    if (problems.length > 0) {
+      return { status: 'failed', summary: `資料の形式が合いません: ${problems.join(' / ').slice(0, 250)}`, outcome: { problems }, errorCode: 'MATERIALS_INVALID' };
+    }
+    const comment = materialsCommentBody(markdown, ctx.runId);
+    await ctx.tool('plan.write', {}, '判断材料を保存');
+    await ctx.artifact('materials', '判断材料（Issue コメント案）', 'materials.md', 'text/markdown', comment);
+    const materials: MaterialsPreview = { comment };
+    return { status: 'succeeded', summary: `判断材料を作成（${this.backend.label}・${model}）`, outcome: { materials } };
+  }
+
+  /**
+   * 人が publish 承認で確かめた資料を Issue にコメントし、終わりのラベル操作（agents-office を外し needs-human を付ける）と
+   * 自分のアサインの取り外しを行う。GitHub への書き込みは API プロセスの GitHub App が行い、Runner にはトークンを渡さない。
+   * どの操作も繰り返して安全（同じ Run の資料コメントがあれば投稿しない・既に無いラベルの取り外しは成功）
+   */
+  private async postMaterials(ctx: StepExecutionContext): Promise<StepOutput> {
+    const approved = ctx.previous.publish as { kind?: unknown; comment?: unknown; labels?: { remove?: unknown; add?: unknown }; unassign?: unknown } | undefined;
+    if (!approved || approved.kind !== 'materials' || typeof approved.comment !== 'string') {
+      throw new RunnerError('人が承認した資料がありません', 'MATERIALS_NOT_APPROVED', false);
+    }
+    const remote = ctx.remote;
+    const issue = ctx.issueNumber;
+    const host = this.opts.remoteHost;
+    if (!remote || !issue || !host) throw new RunnerError('資料コメントは GitHub App で接続した Repo の Issue にだけ書けます', 'MATERIALS_UNAVAILABLE', false);
+    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    const labels = { remove: strings(approved.labels?.remove), add: strings(approved.labels?.add) };
+    const unassign = approved.unassign === true;
+    // 書き込みの前に、行う操作をすべてポリシーで確かめる（途中まで書いて拒否されないように）
+    const args = { repo: ctx.repo, issue };
+    const checks = [
+      await ctx.tool('github.issue.comment', args, `Issue #${issue} に資料コメントを投稿`),
+      await ctx.tool('github.issue.labels', args, `Issue #${issue} のラベル: 外す ${labels.remove.join(', ') || 'なし'} / 付ける ${labels.add.join(', ') || 'なし'}`),
+      ...(unassign ? [await ctx.tool('github.issue.unassign_self', args, `Issue #${issue} の自分のアサインを外す`)] : []),
+    ];
+    const denied = checks.find((c) => !c.allowed);
+    if (denied) return { status: 'failed', summary: `ポリシーで拒否: ${denied.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
+    const posted = await host.postMaterialsComment(ctx, remote, issue, approved.comment);
+    await host.editIssueLabels(ctx, remote, issue, labels);
+    if (unassign) await host.unassignSelf(ctx, remote, issue);
+    return {
+      status: 'succeeded',
+      summary: posted === 'posted' ? `Issue #${issue} に判断材料をコメント` : `Issue #${issue} の判断材料は投稿済み`,
+      outcome: { materialsPosted: { issue, comment: posted, labels, unassigned: unassign } },
     };
   }
 

@@ -83,9 +83,10 @@ export function registerApprovalRoutes(app: Hono<AppEnv>, s: Services) {
         const [run] = await s.db.select().from(runs).where(and(eq(runs.id, ap.runId), eq(runs.workspaceId, a.workspaceId)));
         if (!run || run.status !== 'needs_input') return { updated, run };
         if (body.decision === 'reject') return { updated, run, cancel: true };
-        // GitHub への書き込みの承認: 承認で PR の工程へ、差し戻しで implement からやり直す
+        // GitHub への書き込みの承認: PR は承認で PR の工程へ・差し戻しで implement から、資料は承認でコメントの工程へ・差し戻しで資料から
         if (ap.actionType === 'publish') {
-          const next = await s.engine.resumeAfterPublish(run.id, body.decision, body.comment ?? null);
+          const kind = ap.payload.kind === 'materials' ? 'materials' : 'pull_request';
+          const next = await s.engine.resumeAfterPublish(run.id, body.decision, body.comment ?? null, kind);
           return { updated, run: next ?? run };
         }
         // 利用上限・ブランチ分岐による一時停止: 続行（承認）は止まった工程から再開、差し戻しはコメントを踏まえて再計画

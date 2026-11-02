@@ -307,8 +307,10 @@ const PLAN = {
   needs_human_decision: false,
   questions: [],
   dangerous_operations: [],
+  mode: 'implement',
+  mode_reason: 'コードの変更で完了できる',
 };
-const REVIEW = { verdict: 'ready_for_draft_pr', summary: '問題なし', blockers: [], nits: [], criteria: [] };
+const REVIEW = { verdict: 'ready_for_draft_pr', summary: '問題なし', blockers: [], nits: [], criteria: [], needs_design_decision: false };
 
 beforeAll(async () => {
   // リモート（GitHub の代わり）の bare リポジトリ

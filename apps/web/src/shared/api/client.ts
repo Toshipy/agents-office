@@ -149,7 +149,7 @@ export interface ApprovalDto {
 
 export interface ArtifactMeta {
   id: string;
-  kind: 'plan' | 'diff' | 'test_report' | 'review' | 'draft_pr' | 'log';
+  kind: 'plan' | 'diff' | 'test_report' | 'review' | 'draft_pr' | 'materials' | 'log';
   title: string;
   stepId?: string | null;
   mediaType: string;

@@ -55,6 +55,8 @@ const PLAN = {
   needs_human_decision: false,
   questions: [],
   dangerous_operations: [],
+  mode: 'implement',
+  mode_reason: 'コードの変更で完了できる',
 };
 const REVIEW = {
   verdict: 'ready_for_draft_pr',
@@ -62,6 +64,7 @@ const REVIEW = {
   blockers: [],
   nits: ['テスト名をより具体的に'],
   criteria: [{ criterion: 'greet() が "Hello, world" を返す', met: true, note: '' }],
+  needs_design_decision: false,
 };
 
 const fakeClient: ClaudeMessagesClient = {

@@ -2,6 +2,7 @@
  * GitHub 上のリポジトリを、サーバー上の管理クローン（.data/repos/<repositoryId>）経由で扱う。
  *  - prepare: クローン（初回）/ fetch して、Run の作業ブランチの起点（origin/<既定ブランチ>）を返す
  *  - publish: ai/ ブランチを push し、PR を作成（更新時は push のみ。PR は GitHub 側で自動更新される）
+ *  - postMaterialsComment / editIssueLabels / unassignSelf: 資料モードの Issue コメントと終わりのラベル・アサイン操作
  *
  * Installation token は GIT_ASKPASS 経由で git に渡す（コマンド引数・remote URL・git の設定に残さない）。
  * credential.helper は空にして、OS の資格情報ストアにも保存させない。
@@ -14,6 +15,7 @@ import type { StepExecutionContext } from '../agents/runner';
 import { RunnerError } from '../agents/runner';
 import { headSha, run, safeEnv, wtArgs, type Worktree } from '../agents/claude/git';
 import { Mutex } from '../lib/mutex';
+import { isMaterialsCommentOf } from '../agents/claude/materials';
 import { GithubApiError, type GithubApp } from './app';
 
 export interface RemoteRepo {
@@ -36,6 +38,12 @@ export interface RemoteRepoHost {
   ): Promise<{ number: number; url: string; headSha: string }>;
   /** GitHub 上の ai/ ブランチに人が足したコミットを worktree へ取り込む。履歴が分岐していたら BRANCH_DIVERGED */
   syncBranch(ctx: StepExecutionContext, wt: Worktree, remote: RemoteRepo, branch: string): Promise<'up_to_date' | 'fast_forwarded'>;
+  /** 資料コメントを Issue に投稿する。同じ Run の資料コメント（本文に run: <runId>）が既にあれば投稿しない */
+  postMaterialsComment(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number, body: string): Promise<'posted' | 'already_posted'>;
+  /** Issue のラベルを外し・付ける（既に無いラベルの取り外しは成功とみなす） */
+  editIssueLabels(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number, labels: { remove: string[]; add: string[] }): Promise<void>;
+  /** 自分（PAW_GITHUB_LOGIN）を Issue のアサインから外す */
+  unassignSelf(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number): Promise<void>;
 }
 
 const ASKPASS = `#!/bin/sh
@@ -65,6 +73,8 @@ export class GithubRepoHost implements RemoteRepoHost {
   constructor(
     private readonly app: GithubApp,
     private readonly dataRoot: string,
+    /** 自分の GitHub ログイン名（資料モードで自分のアサインを外すときに使う） */
+    private readonly login: string | null = null,
   ) {}
 
   private lock(repositoryId: number) {
@@ -162,6 +172,43 @@ export class GithubRepoHost implements RemoteRepoHost {
       return { number: pr.number, url: pr.htmlUrl, headSha: sha };
     } catch (err) {
       throw githubRunnerError(err, 'PR を作成できません');
+    }
+  }
+
+  async postMaterialsComment(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number, body: string): Promise<'posted' | 'already_posted'> {
+    try {
+      // 投稿の後で落ちた工程の再試行・再起動で二重に書かないよう、同じ Run の資料コメントを先に探す
+      const comments = await this.app.listIssueComments(remote.installationId, remote.fullName, issueNumber);
+      if (comments.some((c) => isMaterialsCommentOf(c.body, ctx.runId))) {
+        await ctx.log(`Issue #${issueNumber} にはこの Run の資料コメントが既にあるため、投稿しません`);
+        return 'already_posted';
+      }
+      // 本文は人が承認したものをそのまま書く（長さは資料を作るときに収めてある）
+      await this.app.commentOnIssue(remote.installationId, remote.fullName, issueNumber, body);
+      await ctx.log(`Issue #${issueNumber} に資料コメントを投稿しました`);
+      return 'posted';
+    } catch (err) {
+      throw githubRunnerError(err, '資料コメントを投稿できません');
+    }
+  }
+
+  async editIssueLabels(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number, labels: { remove: string[]; add: string[] }): Promise<void> {
+    try {
+      for (const l of labels.remove) await this.app.removeLabel(remote.installationId, remote.fullName, issueNumber, l);
+      if (labels.add.length) await this.app.addLabels(remote.installationId, remote.fullName, issueNumber, labels.add);
+      await ctx.log(`Issue #${issueNumber} のラベル: 外す ${labels.remove.join(', ') || 'なし'} / 付ける ${labels.add.join(', ') || 'なし'}`);
+    } catch (err) {
+      throw githubRunnerError(err, 'Issue のラベルを変更できません');
+    }
+  }
+
+  async unassignSelf(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number): Promise<void> {
+    if (!this.login) throw new RunnerError('自分の GitHub ログイン名が未設定です（PAW_GITHUB_LOGIN）', 'GITHUB_LOGIN_UNSET', false);
+    try {
+      await this.app.removeAssignees(remote.installationId, remote.fullName, issueNumber, [this.login]);
+      await ctx.log(`Issue #${issueNumber} の自分のアサインを外しました`);
+    } catch (err) {
+      throw githubRunnerError(err, 'Issue のアサインを外せません');
     }
   }
 

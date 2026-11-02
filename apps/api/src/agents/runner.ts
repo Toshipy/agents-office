@@ -40,6 +40,8 @@ export interface StepExecutionContext {
   remote: RemoteRepo | null;
   /** GitHub Issue から起動した Run の Issue 番号 */
   issueNumber: number | null;
+  /** 着手時の Issue コメントから決めた振り分け。'implement' なら計画が materials を選んでも実装に進む */
+  modeFromComments: 'implement' | null;
   signal: AbortSignal;
   log(message: string, kind?: 'log' | 'error'): Promise<void>;
   /** Tool Broker を通したツール呼び出し。拒否されても例外は投げず結果を返す */
@@ -107,6 +109,12 @@ export interface PublishPreview {
   diffSha256: string;
   title: string;
   body: string;
+}
+
+/** publish 承認で人に見せる資料コメント（資料モード） */
+export interface MaterialsPreview {
+  /** Issue にそのまま投稿する本文（1 行目の印と、Run の ID の隠し行を含む） */
+  comment: string;
 }
 
 /**

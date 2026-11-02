@@ -39,10 +39,11 @@ import { newId } from '../lib/ids';
 import { digestPayload } from '../lib/crypto';
 import { log } from '../lib/logger';
 import { Mutex } from '../lib/mutex';
-import type { AgentRunner, PublishPreview, StepExecutionContext, StepOutput } from '../agents/runner';
+import type { AgentRunner, MaterialsPreview, PublishPreview, StepExecutionContext, StepOutput } from '../agents/runner';
 import { PublishStaleError, RunnerCrashError, RunnerError, UsageLimitError } from '../agents/runner';
 import type { ArtifactStore } from './artifactStore';
 import { authorizeTool } from './toolBroker';
+import { AGENTS_OFFICE_LABEL, NEEDS_HUMAN_LABEL } from '../github/labels';
 
 export type RunRow = typeof runs.$inferSelect;
 export type StepRow = typeof runSteps.$inferSelect;
@@ -589,9 +590,13 @@ export class WorkflowEngine {
         previous.reviewSummary = o.reviewSummary;
         if (Array.isArray(o.blockers) && o.blockers.length) previous.lastFailure = (o.blockers as string[]).join(' / ');
       }
+      // 実装・レビューの途中で分かった「人が決める必要のあること」は、資料の工程に渡す
+      if ((p.key === 'implement' || p.key === 'review') && o.needsDesignDecision === true && typeof o.designDecision === 'string') {
+        previous.designDecision = o.designDecision;
+      }
     }
-    // PR の工程には、人が最後に承認した publish の内容を渡す（Runner は承認した head と worktree の HEAD を照合する）
-    if (step.key === 'draft_pr' || step.key === 'update_pr') {
+    // PR・資料コメントの工程には、人が最後に承認した publish の内容を渡す（Runner は承認した head と worktree の HEAD を照合する）
+    if (step.key === 'draft_pr' || step.key === 'update_pr' || step.key === 'post_materials') {
       const [approved] = await this.db
         .select({ payload: approvals.payload })
         .from(approvals)
@@ -663,6 +668,7 @@ export class WorkflowEngine {
             }
           : null,
       issueNumber: run.source.type === 'github_issue' ? (run.source.issueNumber ?? null) : null,
+      modeFromComments: run.source.modeFromComments ?? null,
       signal,
       log: async (message, kind = 'log') => {
         assertActive();
@@ -896,17 +902,37 @@ export class WorkflowEngine {
           await this.failRun(run.id, 'INVALID_PLAN', '計画の構造検証に失敗しました');
           return;
         }
+        // 資料に振り分けられるのは GitHub App で接続した Repo の Issue だけ。前の資料の後に人のコメントがあれば実装に進む
+        const materials = o.mode === 'materials' && run.source.modeFromComments !== 'implement' && (await this.materialsAllowed(run));
         const r = await this.transition(run.id, 'running', { plan: parsed.data as PlanJson });
-        if (r) await this.addStep(r, 'implement', 'developer', r.revisionCount);
+        if (r) await (materials ? this.addStep(r, 'materials', 'planner', r.revisionCount) : this.addStep(r, 'implement', 'developer', r.revisionCount));
         return;
       }
       case 'implement': {
+        if (o.needsDesignDecision === true) {
+          await this.switchToMaterials(run, 'developer', String(o.designDecision ?? ''));
+          return;
+        }
         const r = await this.transition(run.id, 'validating');
         if (r) await this.addStep(r, 'test', 'tester', r.revisionCount);
         return;
       }
+      case 'materials': {
+        await this.requestMaterialsPublish(run, o.materials);
+        return;
+      }
+      case 'post_materials': {
+        // 資料をコメントし、needs-human を付けた: 人が会議で決めるのを待つので Run は終える
+        const r = await this.transition(run.id, 'approved');
+        if (r) await this.transition(run.id, 'completed');
+        return;
+      }
       case 'test':
       case 'review': {
+        if (step.key === 'review' && o.needsDesignDecision === true) {
+          await this.switchToMaterials(run, 'reviewer', String(o.designDecision ?? ''));
+          return;
+        }
         const ok = step.key === 'test' ? o.passed === true : o.approved === true;
         if (ok) {
           if (step.key === 'test') await this.addStep(run, 'review', 'reviewer', run.revisionCount);
@@ -1063,6 +1089,41 @@ export class WorkflowEngine {
       await this.failRun(run.id, 'PUBLISH_PREVIEW_MISSING', 'publish 承認に載せる PR の内容がありません');
       return;
     }
+    const update = run.pr !== null;
+    await this.openPublishApproval(run, 'reviewer', update ? `PR #${run.pr!.number} の更新を GitHub に書き込む` : 'PR を GitHub に作る', {
+      kind: 'pull_request',
+      headSha: p.headSha,
+      diffSha256: p.diffSha256,
+      title: p.title,
+      body: p.body,
+      // 終わりのラベル操作は後の工程で足す。今は何も変えない
+      labels: { remove: [] as string[], add: [] as string[] },
+      update,
+    });
+  }
+
+  /**
+   * 資料コメントを Issue に書く前に、Run を needs_input にして publish 承認（kind: 'materials'）を作る。
+   * 承認するまで post_materials の工程は足さない。終わりのラベル操作（agents-office を外し needs-human を付ける）と、
+   * 着手時に自分をアサインしていたならその取り外しも、承認する内容に含める
+   */
+  private async requestMaterialsPublish(run: RunRow, preview: unknown) {
+    const p = preview as Partial<MaterialsPreview> | undefined;
+    const issue = run.source.issueNumber;
+    if (!p || typeof p.comment !== 'string' || !p.comment.trim() || !issue) {
+      await this.failRun(run.id, 'PUBLISH_PREVIEW_MISSING', 'publish 承認に載せる資料がありません');
+      return;
+    }
+    await this.openPublishApproval(run, 'planner', `Issue #${issue} に判断材料をコメントする`, {
+      kind: 'materials',
+      comment: p.comment,
+      labels: { remove: [AGENTS_OFFICE_LABEL], add: [NEEDS_HUMAN_LABEL] },
+      unassign: run.source.assignedBySelf === true,
+    });
+  }
+
+  /** publish 承認を作り、Run を needs_input にする（既に未決の publish 承認があればそれを使う） */
+  private async openPublishApproval(run: RunRow, role: AgentRole, title: string, payload: Record<string, unknown>) {
     // 遷移の前に未決の承認を確かめる（createApproval は未決があると何もしないため、判断できない needs_input で止まらないようにする）
     const pending = await this.db
       .select({ actionType: approvals.actionType })
@@ -1077,17 +1138,43 @@ export class WorkflowEngine {
     if (pending.length > 0) await this.supersedePendingApprovals(run.id);
     const r = await this.transition(run.id, 'needs_input');
     if (!r) return;
-    const update = r.pr !== null;
-    await this.createApproval(r, 'publish', 'reviewer', update ? `PR #${r.pr!.number} の更新を GitHub に書き込む` : 'PR を GitHub に作る', {
-      kind: 'pull_request',
-      headSha: p.headSha,
-      diffSha256: p.diffSha256,
-      title: p.title,
-      body: p.body,
-      // 終わりのラベル操作は後の工程で足す。今は何も変えない
-      labels: { remove: [] as string[], add: [] as string[] },
-      update,
-    });
+    await this.createApproval(r, 'publish', role, title, payload);
+  }
+
+  /**
+   * 資料モードにできる Run か: Claude で実行する、GitHub App で接続した Repo の Issue の Run。
+   * ローカル・シミュレーターの Repo や Issue の無い Run には、資料を書く先が無い
+   */
+  private async materialsAllowed(run: RunRow): Promise<boolean> {
+    if (run.runtime === 'simulated') return false;
+    if (run.source.type !== 'github_issue' || !run.source.issueNumber) return false;
+    const [binding] = await this.db
+      .select({ verification: repositoryBindings.verification })
+      .from(repositoryBindings)
+      .where(eq(repositoryBindings.projectId, run.projectId));
+    return binding?.verification === 'github_app';
+  }
+
+  /**
+   * 実装・レビューの途中で設計の判断が要ると分かった（変更は Runner が捨て済み）。
+   *  - 資料モードにできる Run（PR がまだ無い GitHub App の Issue）: 資料の工程へ切り替える
+   *  - PR のある Run・Issue の無い Run: 書く先の資料が無い（PR は人がレビュー中）ので、needs_input で人の判断を待つ
+   */
+  private async switchToMaterials(run: RunRow, role: 'developer' | 'reviewer', decision: string) {
+    if (run.pr || !(await this.materialsAllowed(run))) {
+      const r = await this.transition(run.id, 'needs_input');
+      if (!r) return;
+      await this.createApproval(r, 'clarification', role, '設計の判断が必要です', {
+        reason: 'needs_design_decision',
+        questions: [decision || '設計の判断が必要です'],
+        requestExcerpt: run.request.slice(0, 600),
+        ...(run.pr ? { pr: run.pr } : {}),
+        note: '決めた方針をコメントに書いて差し戻すと、その内容を踏まえて再計画します。中止すると Run を終了します。',
+      });
+      return;
+    }
+    const r = await this.transition(run.id, 'running');
+    if (r) await this.addStep(r, 'materials', 'planner', r.revisionCount);
   }
 
   /**
@@ -1123,9 +1210,25 @@ export class WorkflowEngine {
    *  - 承認: validating に戻し、PR の工程（draft_pr / update_pr）を足す
    *  - 差し戻し: コメントを指示として running にし、implement からやり直す（AI レビュー → publish 承認をもう一度通る）
    */
-  async resumeAfterPublish(runId: string, decision: 'approve' | 'request_changes', comment: string | null): Promise<RunRow | null> {
+  async resumeAfterPublish(
+    runId: string,
+    decision: 'approve' | 'request_changes',
+    comment: string | null,
+    kind: 'pull_request' | 'materials' = 'pull_request',
+  ): Promise<RunRow | null> {
     const [cur] = await this.db.select().from(runs).where(eq(runs.id, runId));
     if (!cur || cur.status !== 'needs_input') return null;
+    if (kind === 'materials') {
+      // 資料: 承認で Issue へのコメントとラベル操作の工程へ、差し戻しでコメントを指示にして資料を作り直す（コードは変えない）
+      if (decision === 'approve') {
+        const r = await this.transition(runId, 'running');
+        if (r) await this.addStep(r, 'post_materials', 'tool_broker', r.revisionCount);
+        return r;
+      }
+      const r = await this.transition(runId, 'running', { guidance: comment?.slice(0, 2000) || '人の差し戻しへの対応' });
+      if (r) await this.addStep(r, 'materials', 'planner', r.revisionCount);
+      return r;
+    }
     if (decision === 'approve') {
       const r = await this.transition(runId, 'validating');
       if (r) await this.addStep(r, r.pr ? 'update_pr' : 'draft_pr', 'tool_broker', r.revisionCount);

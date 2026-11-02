@@ -20,7 +20,7 @@ import {
   type ContentContext,
   type DiffResult,
 } from './content';
-import { RunnerCrashError, type AgentRunner, type StepExecutionContext, type StepOutput } from './runner';
+import { RunnerCrashError, RunnerError, type AgentRunner, type StepExecutionContext, type StepOutput } from './runner';
 import { sha256Hex } from '../lib/crypto';
 
 export const SIM_MODEL = 'simulated-local';
@@ -77,6 +77,10 @@ export class SimulatedRunner implements AgentRunner {
       case 'update_pr':
         out = await this.pullRequest(ctx, rand);
         break;
+      case 'materials':
+      case 'post_materials':
+        // 資料モードは GitHub App で接続した Repo の Issue だけ（シミュレーターは常に実装として進む）
+        throw new RunnerError('シミュレーターでは資料の工程を実行しません', 'NOT_SUPPORTED', false);
     }
     const expensive = PATTERNS.simExpensive.test(ctx.request);
     const scale = expensive ? 400 : 1;

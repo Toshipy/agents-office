@@ -14,7 +14,7 @@ import { z } from 'zod';
 import type { StepExecutionContext } from '../runner';
 import { RunnerCrashError, RunnerError } from '../runner';
 import { confine, grep, listFiles } from './git';
-import type { DevelopRequest, ModelBackend, StructuredRequest } from './shared';
+import { STRUCTURED_LABEL, type DevelopRequest, type ModelBackend, type StructuredRequest } from './shared';
 
 /** Anthropic の公開価格（USD / 1M tokens）。費用表示は API が返したトークン数（実測）× この単価 */
 const PRICES: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
@@ -174,7 +174,7 @@ export class ClaudeApiBackend implements ModelBackend {
       await this.recordUsage(ctx, response, started);
       this.checkStop(response);
       const output = response.parsed_output as T | null;
-      if (!output) throw new RunnerError(`${req.purpose === 'plan' ? '計画' : 'レビュー'}の構造化出力を解析できませんでした`, 'CLAUDE_BAD_OUTPUT', true);
+      if (!output) throw new RunnerError(`${STRUCTURED_LABEL[req.purpose]}の構造化出力を解析できませんでした`, 'CLAUDE_BAD_OUTPUT', true);
       return { output, model: response.model };
     });
   }

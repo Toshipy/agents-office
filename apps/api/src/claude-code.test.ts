@@ -45,8 +45,10 @@ const PLAN = {
   needs_human_decision: false,
   questions: [],
   dangerous_operations: [],
+  mode: 'implement',
+  mode_reason: 'コードの変更で完了できる',
 };
-const REVIEW = { verdict: 'ready_for_draft_pr', summary: '問題なし', blockers: [], nits: [], criteria: [{ criterion: 'greet() が Hello, world を返す', met: true, note: '' }] };
+const REVIEW = { verdict: 'ready_for_draft_pr', summary: '問題なし', blockers: [], nits: [], criteria: [{ criterion: 'greet() が Hello, world を返す', met: true, note: '' }], needs_design_decision: false };
 const GOOD_DEV = { writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Hello, world';\n" }], text: 'greet の文言を変更しました' };
 
 function setScenario(sc: Record<string, unknown>) {

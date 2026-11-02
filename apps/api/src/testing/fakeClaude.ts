@@ -29,7 +29,8 @@ if (schema && JSON.parse(schema).$schema) {
   process.stderr.write('Error: --json-schema is not a valid JSON Schema: no schema with key or ref "' + JSON.parse(schema).$schema + '"\n');
   process.exit(1);
 }
-const purpose = schema ? (schema.includes('verdict') ? 'review' : 'plan') : 'develop';
+// 構造化出力のスキーマで工程を見分ける（review は verdict、materials は markdown だけを持つ）
+const purpose = schema ? (schema.includes('verdict') ? 'review' : schema.includes('"markdown"') ? 'materials' : 'plan') : 'develop';
 const countsFile = join(here, 'counts.json');
 const counts = existsSync(countsFile) ? JSON.parse(readFileSync(countsFile, 'utf8')) : {};
 counts[purpose] = (counts[purpose] ?? 0) + 1;

@@ -239,6 +239,15 @@ export async function discardChanges(worktree: Worktree | string) {
   await wtGit(worktree, ['clean', '-fdq']);
 }
 
+/**
+ * 作業ツリーを起点（baseSha）に戻す。この Run のコミットと未コミットの変更をすべて捨てる。
+ * まだ GitHub に出していない（PR の無い）Run を、設計の判断待ちで資料に切り替えるときに使う
+ */
+export async function resetToBase(wt: Worktree) {
+  await wtGit(wt, ['reset', '--hard', '-q', wt.baseSha]);
+  await wtGit(wt, ['clean', '-fdq']);
+}
+
 export async function headSha(worktree: Worktree | string): Promise<string> {
   return (await wtGit(worktree, ['rev-parse', 'HEAD'])).trim();
 }

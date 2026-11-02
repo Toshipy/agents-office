@@ -72,7 +72,7 @@ export async function createServices(
   if (github && github.cfg.allowedUsers.length === 0) {
     log.warn('PAW_GITHUB_ALLOWED_USERS が未設定のため、GitHub の Issue・レビューからは Run を起動しません');
   }
-  const remoteHost = github ? new GithubRepoHost(github, config.dataRoot) : null;
+  const remoteHost = github ? new GithubRepoHost(github, config.dataRoot, config.githubLogin) : null;
   const testSandbox: TestSandbox = config.testSandbox === 'docker' ? new DockerSandbox({ network: config.testNetwork, defaultImage: config.testImage }) : new HostSandbox();
   const common = { worktreesDir: config.worktreesDir, testTimeoutMs: config.testTimeoutMs, testSandbox, remoteHost };
   const runner =

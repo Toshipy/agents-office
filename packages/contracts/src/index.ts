@@ -104,7 +104,8 @@ export const STEP_STATUSES = [
 ] as const;
 export type StepStatus = (typeof STEP_STATUSES)[number];
 
-export const STEP_KEYS = ['plan', 'implement', 'test', 'review', 'draft_pr', 'update_pr'] as const;
+/** materials / post_materials は資料モード（人が決める Issue の判断材料を Issue コメントに書く）の工程 */
+export const STEP_KEYS = ['plan', 'implement', 'test', 'review', 'draft_pr', 'update_pr', 'materials', 'post_materials'] as const;
 export type StepKey = (typeof STEP_KEYS)[number];
 
 /* ------------------------------------------------------------------ */
@@ -478,6 +479,8 @@ export const STEP_KEY_LABEL: Record<StepKey, string> = {
   review: 'レビュー',
   draft_pr: 'Draft PR作成',
   update_pr: 'PR更新',
+  materials: '判断材料',
+  post_materials: '資料コメント',
 };
 
 export const APPROVAL_TYPE_LABEL: Record<ApprovalActionType, string> = {
