@@ -24,6 +24,8 @@ export interface StepExecutionContext {
   /** 依頼本文（Issue 本文を含む）。非信頼入力として扱う */
   request: string;
   guidance: string | null;
+  /** 画面で任せたときの追加指示（信頼できる指示）。guidance と違い、危険操作・要件確認の停止を外さない */
+  extraInstruction: string | null;
   repo: string | null;
   branch: string;
   fixLoops: number;

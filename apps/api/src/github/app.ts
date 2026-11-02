@@ -50,6 +50,9 @@ export interface GithubIssue {
   labels: string[];
   assignees: string[];
   updatedAt: string;
+  /** getIssue だけが埋める。PR 番号を Issue として扱わないために使う */
+  isPullRequest?: boolean;
+  state?: 'open' | 'closed';
 }
 
 export interface GithubComment {
@@ -77,6 +80,7 @@ interface RawIssue {
   assignees?: { login: string }[];
   updated_at: string;
   pull_request?: unknown;
+  state?: string;
 }
 
 const toIssue = (i: RawIssue): GithubIssue => ({
@@ -219,7 +223,8 @@ export class GithubApp {
   }
 
   async getIssue(installationId: number, fullName: string, number: number): Promise<GithubIssue> {
-    return toIssue(await this.request<RawIssue>('GET', `${this.repoPath(fullName)}/issues/${number}`, { installationId }));
+    const raw = await this.request<RawIssue>('GET', `${this.repoPath(fullName)}/issues/${number}`, { installationId });
+    return { ...toIssue(raw), isPullRequest: Boolean(raw.pull_request), state: raw.state === 'closed' ? 'closed' : 'open' };
   }
 
   async listIssueComments(installationId: number, fullName: string, number: number): Promise<GithubComment[]> {

@@ -98,7 +98,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   raceAssignee = null;
   state = [];
-  await s.db.delete(runs);
+  await s.client.exec('truncate table runs cascade');
 });
 
 describe('IssueIntake.start', () => {
@@ -123,8 +123,9 @@ describe('IssueIntake.start', () => {
     const [run] = await s.db.select().from(runs);
     expect(run.issueKey).toBe(`${REPO_ID}#10`);
     expect(run.source.assignedBySelf).toBe(true);
-    // 人の指示は guidance、Issue 由来の文字列は request に閉じ込める
-    expect(run.guidance).toBe('テストも足して');
+    // 画面の指示は run.guidance ではなく delegateGuidance、Issue 由来の文字列は request に閉じ込める
+    expect(run.guidance).toBeNull();
+    expect(run.source.delegateGuidance).toBe('テストも足して');
     expect(run.request).toContain('本文 10');
     expect(run.request).toContain('補足です');
     expect(run.request).not.toContain('テストも足して');
@@ -176,8 +177,86 @@ describe('IssueIntake.start', () => {
   });
 });
 
+describe('IssueIntake.start の巻き戻しと安全', () => {
+  const assertClean = (n: number, labels: string[]) => {
+    const i = state.find((x) => x.number === n)!;
+    expect(i.assignees).toEqual([]);
+    expect(i.labels.sort()).toEqual([...labels].sort());
+  };
+
+  it('アサイン後にコメント取得が失敗したら、ラベル・needs-human・アサインを戻し、再試行で assignedBySelf が付く', async () => {
+    state = [mk(40, { labels: ['needs-human'] })];
+    (fake.listIssueComments as any).mockRejectedValueOnce(new Error('boom'));
+    await expect(intake.start(binding, 40, { via: 'ui', labeledBy: null, guidance: null })).rejects.toThrow('boom');
+    assertClean(40, ['needs-human']);
+    expect(await s.db.select().from(runs)).toHaveLength(0);
+    const r = await intake.start(binding, 40, { via: 'ui', labeledBy: null, guidance: null });
+    expect('runId' in r).toBe(true);
+    const [run] = await s.db.select().from(runs);
+    expect(run.source.assignedBySelf).toBe(true);
+  });
+
+  it('Run の作成が失敗しても、付けたラベル・外した needs-human・アサインを戻す', async () => {
+    state = [mk(41, { labels: ['needs-human'] })];
+    const spy = vi.spyOn(s.engine, 'createRun').mockRejectedValueOnce(new Error('db down'));
+    await expect(intake.start(binding, 41, { via: 'ui', labeledBy: null, guidance: null })).rejects.toThrow('db down');
+    spy.mockRestore();
+    assertClean(41, ['needs-human']);
+  });
+
+  it('同時アサインで見送るときも、付けたラベルと外した needs-human を戻す', async () => {
+    state = [mk(42, { labels: ['needs-human'] })];
+    raceAssignee = 'someone';
+    const r = await intake.start(binding, 42, { via: 'ui', labeledBy: null, guidance: null });
+    expect(r).toEqual({ skipped: 'assigned_concurrently' });
+    const i = state.find((x) => x.number === 42)!;
+    expect(i.labels.sort()).toEqual(['needs-human']);
+    expect(i.assignees).toEqual(['someone']);
+  });
+
+  it('アサインが黙って無視されたら見送る', async () => {
+    state = [mk(43)];
+    (fake.addAssignees as any).mockImplementationOnce(async () => undefined);
+    const r = await intake.start(binding, 43, { via: 'ui', labeledBy: null, guidance: null });
+    expect(r).toEqual({ skipped: 'assign_failed' });
+    expect(state[0].labels).toEqual([]);
+    expect(await s.db.select().from(runs)).toHaveLength(0);
+  });
+
+  it('PR の番号と closed の Issue は始めない', async () => {
+    state = [mk(44, { isPullRequest: true } as any), mk(45, { state: 'closed' } as any)];
+    expect(await intake.start(binding, 44, { via: 'ui', labeledBy: null, guidance: null })).toEqual({ skipped: 'not_an_issue' });
+    expect(await intake.start(binding, 45, { via: 'ui', labeledBy: null, guidance: null })).toEqual({ skipped: 'issue_closed' });
+    expect(fake.addLabels).not.toHaveBeenCalled();
+  });
+
+  it('保存された triggerLabel が別でも、画面から任せると agents-office を付ける', async () => {
+    state = [mk(46)];
+    const other = { ...binding, policy: { ...binding.policy, triggerLabel: 'custom-label' } };
+    await intake.start(other, 46, { via: 'ui', labeledBy: null, guidance: null });
+    expect(fake.addLabels).toHaveBeenCalledWith(INSTALLATION_ID, FULL_NAME, 46, ['agents-office']);
+  });
+
+  it('追加指示つきで危険な本文の Issue を任せても needs_input で止まる', async () => {
+    state = [mk(47, { body: '本番 DB のテーブルを drop table して高速化して' })];
+    await s.engine.start();
+    const r = await intake.start(binding, 47, { via: 'ui', labeledBy: null, guidance: '丁寧に進めて' });
+    const runId = (r as { runId: string }).runId;
+    let status = '';
+    for (let n = 0; n < 500 && status !== 'needs_input'; n++) {
+      [{ status }] = await s.db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
+      if (status !== 'needs_input') await new Promise((res) => setTimeout(res, 50));
+    }
+    await s.engine.stop();
+    expect(status).toBe('needs_input');
+    const [run] = await s.db.select().from(runs).where(eq(runs.id, runId));
+    expect(run.guidance).toBeNull();
+    expect(run.source.delegateGuidance).toBe('丁寧に進めて');
+  }, 30_000);
+});
+
 describe('IssueIntake.list', () => {
-  it('一覧は 3 つの欄に分かれ、PR と nightly-ok と他人の担当を出さない', async () => {
+  it('一覧は 3 つの欄に分かれ、nightly-ok と他人の担当を出さない（PR の除外は GithubApp.listOpenIssues 側）', async () => {
     state = [mk(20), mk(21, { labels: ['needs-human'] }), mk(22, { labels: ['nightly-ok'] }), mk(23, { assignees: ['someone'] }), mk(24, { assignees: [LOGIN] }), mk(25)];
     const started = await intake.start(binding, 25, { via: 'ui', labeledBy: null, guidance: null });
     const l = await intake.list(projectId);
@@ -203,6 +282,13 @@ describe('Issue API', () => {
     const again = await app.request(`/v1/projects/${projectId}/issues/30/delegate`, { method: 'POST', headers: headers(), body: '{}' });
     expect(again.status).toBe(409);
     expect(await s.db.select().from(runs)).toHaveLength(1);
+  });
+
+  it('GitHub App の Repo は起動ラベルを agents-office 以外にできない', async () => {
+    const put = (triggerLabel: string) =>
+      app.request(`/v1/projects/${projectId}/automation-policy`, { method: 'PUT', headers: headers(), body: JSON.stringify({ enabled: true, triggerLabel, events: ['issues.labeled'], maxRevisionAttempts: 3 }) });
+    expect((await put('ai:ready')).status).toBe(422);
+    expect((await put('agents-office')).status).toBe(200);
   });
 
   it('GitHub App でない Project は 409', async () => {

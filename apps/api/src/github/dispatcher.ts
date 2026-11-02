@@ -13,6 +13,7 @@ import { log } from '../lib/logger';
 import type { WorkflowEngine } from '../workflow/engine';
 import type { GithubApp } from './app';
 import type { IssueIntake } from './issueIntake';
+import { AGENTS_OFFICE_LABEL } from './labels';
 
 const MAX_DELIVERY_ATTEMPTS = 5;
 
@@ -136,7 +137,8 @@ export class Dispatcher {
     const eventName = `issues.${action}` as 'issues.opened' | 'issues.labeled';
     if (!binding.policy.events.includes(eventName)) return ignore('event_not_enabled');
     if (!binding.automationEnabled) return ignore('automation_disabled');
-    const label = binding.policy.triggerLabel;
+    // GitHub App の Repo は起動ラベル固定。simulated だけ policy の値を使う
+    const label = binding.verification === 'github_app' ? AGENTS_OFFICE_LABEL : binding.policy.triggerLabel;
     const labels: string[] = Array.isArray(issue.labels)
       ? issue.labels.map((l: any) => String(l?.name ?? '')).filter(Boolean)
       : [];

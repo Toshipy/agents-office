@@ -10,6 +10,7 @@ import type { Db } from '../db/client';
 import { repositoryBindings, runs, webhookDeliveries } from '../db/schema';
 import { log } from '../lib/logger';
 import type { GithubApp } from './app';
+import { AGENTS_OFFICE_LABEL } from './labels';
 
 export const POLL_PROVIDER = 'github_poll';
 
@@ -100,7 +101,7 @@ export class GithubPoller {
       .orderBy(repositoryBindings.createdAt, repositoryBindings.id);
     for (const b of bindings) {
       try {
-        const label = b.policy.triggerLabel;
+        const label = AGENTS_OFFICE_LABEL;
         const issues = await this.github.listIssuesWithLabel(b.installationId, b.fullName, label);
         for (const issue of issues) {
           // 同じ Issue の Run が動いている間は、取り込んでも Dispatcher が捨てるだけなので events API を呼ばない

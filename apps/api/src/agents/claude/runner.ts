@@ -159,6 +159,7 @@ export class ClaudeRunner implements AgentRunner {
       user: [
         `<untrusted_request>\nタイトル: ${ctx.title}\n\n${ctx.request}\n</untrusted_request>`,
         ctx.guidance ? `人からの追加指示（信頼できる指示）: ${ctx.guidance}` : '',
+        ctx.extraInstruction ? `任せるときの追加指示（信頼できる指示）: ${ctx.extraInstruction}` : '',
         `<repository_context>\n${context}\n</repository_context>`,
       ]
         .filter(Boolean)
@@ -202,6 +203,7 @@ export class ClaudeRunner implements AgentRunner {
       plan.summary,
       '',
       ...(ctx.guidance ? ['## 人からの追加指示', '', `> ${ctx.guidance}`, ''] : []),
+      ...(ctx.extraInstruction ? ['## 任せるときの追加指示', '', `> ${ctx.extraInstruction}`, ''] : []),
       '## 進め方',
       '',
       ...plan.approach.map((a, i) => `${i + 1}. ${a}`),
@@ -241,6 +243,7 @@ export class ClaudeRunner implements AgentRunner {
     if (ctx.remote && this.opts.remoteHost) await this.opts.remoteHost.syncBranch(ctx, wt, ctx.remote, ctx.branch);
     const detail = ctx.previous.planDetail as PlanOutput | undefined;
     const feedback = [
+      ctx.extraInstruction ? `任せるときの追加指示（信頼できる指示）: ${ctx.extraInstruction}` : '',
       ctx.revision > 0 && ctx.guidance ? `PR レビューでの指摘（revision ${ctx.revision}）: ${ctx.guidance}` : '',
       ctx.previous.lastFailure ? `前回の検証で見つかった問題: ${String(ctx.previous.lastFailure)}` : '',
     ]

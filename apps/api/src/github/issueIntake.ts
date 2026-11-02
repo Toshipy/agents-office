@@ -10,6 +10,7 @@ import { projects, repositoryBindings, runs, workspaces, type RunSource } from '
 import { AppError } from '../lib/errors';
 import type { WorkflowEngine } from '../workflow/engine';
 import type { GithubApp, GithubComment, GithubIssue } from './app';
+import { AGENTS_OFFICE_LABEL } from './labels';
 
 type Binding = typeof repositoryBindings.$inferSelect;
 
@@ -121,6 +122,8 @@ export class IssueIntake {
     let issue: GithubIssue | null = null;
     if (real) {
       issue = await gh!.getIssue(binding.installationId, binding.fullName, issueNumber);
+      if (issue.isPullRequest) return { skipped: 'not_an_issue' };
+      if (issue.state === 'closed') return { skipped: 'issue_closed' };
       if (issue.assignees.some((a) => !same(a, login!))) return { skipped: 'assigned_to_other' };
       if (issue.labels.includes(NIGHTLY_LABEL)) return { skipped: 'nightly' };
     }
@@ -131,34 +134,70 @@ export class IssueIntake {
       .limit(1);
     if (dup) return { skipped: 'duplicate_issue_run' };
 
-    let assignedBySelf = false;
+    // 3〜5. GitHub への変更は、途中で見送り・失敗したら全部戻す（付けたラベル・外した needs-human・自分のアサイン）
+    const label = real ? AGENTS_OFFICE_LABEL : binding.policy.triggerLabel;
+    const done = { label: false, needsHuman: false, assigned: false };
+    const rollback = async () => {
+      if (!real) return;
+      const ref = [binding.installationId, binding.fullName, issueNumber] as const;
+      if (done.assigned) await gh!.removeAssignees(...ref, [login!]).catch(() => undefined);
+      if (done.needsHuman) await gh!.addLabels(...ref, [NEEDS_HUMAN_LABEL]).catch(() => undefined);
+      if (done.label) await gh!.removeLabel(...ref, label).catch(() => undefined);
+    };
     let comments: GithubComment[] = [];
-    if (real && issue) {
-      // 3. 画面から任せるときは起動ラベルを付け、資料待ちの印は外す
-      if (opts.via === 'ui') {
-        if (!issue.labels.includes(binding.policy.triggerLabel)) await gh!.addLabels(binding.installationId, binding.fullName, issueNumber, [binding.policy.triggerLabel]);
-      }
-      if (issue.labels.includes(NEEDS_HUMAN_LABEL)) await gh!.removeLabel(binding.installationId, binding.fullName, issueNumber, NEEDS_HUMAN_LABEL);
-      // 4. 未アサインなら自分をアサインし、同時に他人も入っていたら自分を外して譲る
-      if (issue.assignees.length === 0) {
-        await gh!.addAssignees(binding.installationId, binding.fullName, issueNumber, [login!]);
-        const again = await gh!.getIssue(binding.installationId, binding.fullName, issueNumber);
-        if (again.assignees.some((a) => !same(a, login!))) {
-          await gh!.removeAssignees(binding.installationId, binding.fullName, issueNumber, [login!]);
-          return { skipped: 'assigned_concurrently' };
+    let created: { id: string };
+    try {
+      if (real && issue) {
+        const ref = [binding.installationId, binding.fullName, issueNumber] as const;
+        // 画面から任せるときは起動ラベルを付け、資料待ちの印は外す
+        if (opts.via === 'ui' && !issue.labels.includes(label)) {
+          await gh!.addLabels(...ref, [label]);
+          done.label = true;
         }
-        assignedBySelf = true;
+        if (issue.labels.includes(NEEDS_HUMAN_LABEL)) {
+          await gh!.removeLabel(...ref, NEEDS_HUMAN_LABEL);
+          done.needsHuman = true;
+        }
+        // 未アサインなら自分をアサインし、取り直して自分だけであることを確かめる（他人も入っていたら譲る）
+        if (issue.assignees.length === 0) {
+          done.assigned = true; // addAssignees が途中で失敗しても、戻すときに外す
+          await gh!.addAssignees(...ref, [login!]);
+          const again = await gh!.getIssue(...ref);
+          if (again.assignees.some((a) => !same(a, login!))) {
+            await rollback();
+            return { skipped: 'assigned_concurrently' };
+          }
+          if (!again.assignees.some((a) => same(a, login!))) {
+            await rollback();
+            return { skipped: 'assign_failed' };
+          }
+        }
+        comments = await gh!.listIssueComments(...ref);
       }
-      // 5. コメントを取る
-      comments = await gh!.listIssueComments(binding.installationId, binding.fullName, issueNumber);
+      created = await this.createRunFor(binding, issueNumber, opts, issue, comments, done.assigned);
+    } catch (err) {
+      await rollback();
+      throw err;
     }
+    return { runId: created.id };
+  }
 
+  private async createRunFor(
+    binding: Binding,
+    issueNumber: number,
+    opts: StartOptions,
+    issue: GithubIssue | null,
+    comments: GithubComment[],
+    assignedBySelf: boolean,
+  ): Promise<{ id: string }> {
+    const issueKey = `${binding.repositoryId}#${issueNumber}`;
     const [project] = await this.db.select().from(projects).where(eq(projects.id, binding.projectId));
     const [ws] = await this.db.select().from(workspaces).where(eq(workspaces.id, binding.workspaceId));
-    if (!project || !ws) return { skipped: 'project_missing' };
+    if (!project || !ws) throw new Error('project_missing');
     const title = (issue?.title ?? opts.payload?.title ?? '').slice(0, 110) || `Issue #${issueNumber}`;
     const body = issue?.body ?? opts.payload?.body ?? '';
     const url = issue?.htmlUrl ?? opts.payload?.htmlUrl;
+    const guidance = opts.guidance?.trim();
     const source: RunSource = {
       type: 'github_issue',
       issueNumber,
@@ -166,25 +205,20 @@ export class IssueIntake {
       deliveryId: opts.deliveryId,
       repositoryId: binding.repositoryId,
       ...(assignedBySelf ? { assignedBySelf: true } : {}),
+      // 画面で添えた指示は run.guidance ではなく別の入れ物に入れる（停止の判定を外さないため）
+      ...(guidance ? { delegateGuidance: guidance } : {}),
     };
-    try {
-      const run = await this.engine.createRun({
-        workspaceId: ws.id,
-        projectId: project.id,
-        title: `#${issueNumber} ${title}`,
-        request: buildRequest({ title, body }, comments),
-        guidance: opts.guidance?.trim() || null,
-        source,
-        issueKey,
-        maxRevisionAttempts: binding.policy.maxRevisionAttempts,
-        budgetLimitUsd: ws.runBudgetUsd,
-        runtime: this.engine.runtimeFor(binding),
-      });
-      return { runId: run.id };
-    } catch (err) {
-      // Run が作れなかったなら、付けた担当を戻す
-      if (assignedBySelf) await gh!.removeAssignees(binding.installationId, binding.fullName, issueNumber, [login!]).catch(() => undefined);
-      throw err;
-    }
+    const run = await this.engine.createRun({
+      workspaceId: ws.id,
+      projectId: project.id,
+      title: `#${issueNumber} ${title}`,
+      request: buildRequest({ title, body }, comments),
+      source,
+      issueKey,
+      maxRevisionAttempts: binding.policy.maxRevisionAttempts,
+      budgetLimitUsd: ws.runBudgetUsd,
+      runtime: this.engine.runtimeFor(binding),
+    });
+    return { id: run.id };
   }
 }

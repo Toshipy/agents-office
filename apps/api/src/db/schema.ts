@@ -153,6 +153,8 @@ export interface RunSource {
   requestedBy?: string;
   /** 着手時に自分（t.arai）を Issue のアサインにした。終わりや失敗で外す対象 */
   assignedBySelf?: boolean;
+  /** 画面の「AI に任せる」で添えた指示（信頼できる追加指示）。run.guidance（再開時の回答）とは別。停止の判定には使わない */
+  delegateGuidance?: string;
 }
 
 export interface RunPr {

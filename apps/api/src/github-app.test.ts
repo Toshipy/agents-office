@@ -57,6 +57,8 @@ const ops = {
   issues: [] as any[],
   labelEvents: [] as any[],
   openPulls: [] as any[],
+  /** アサインされた Issue 番号（取り直した Issue に自分の担当を反映する） */
+  assigned: new Set<number>(),
   handle(method: string, path: string, rawUrl: string, body: any, send: (s: number, j: unknown) => void, needInstallation: () => boolean): boolean {
     const q = new URL(rawUrl, 'http://x').searchParams;
     const page = Number(q.get('page') ?? '1');
@@ -75,7 +77,7 @@ const ops = {
       const n = Number(m![1]);
       const i = ops.issues.find((x) => x.number === n);
       // Webhook から来る Issue は ops.issues に無いので、IssueIntake が取り直す分は同じ内容を返す
-      send(200, i ?? { number: n, title: 'greet の文言を変更', body: 'greet() が Hello, world を返すようにしてください', html_url: `https://github.com/${FULL_NAME}/issues/${n}`, labels: [{ name: 'agents-office' }], assignees: [], updated_at: '2026-01-01T00:00:00Z' });
+      send(200, i ?? { number: n, title: 'greet の文言を変更', body: 'greet() が Hello, world を返すようにしてください', html_url: `https://github.com/${FULL_NAME}/issues/${n}`, labels: [{ name: 'agents-office' }], assignees: ops.assigned.has(n) ? [{ login: 'toshipy' }] : [], updated_at: '2026-01-01T00:00:00Z' });
       return true;
     }
     if (method === 'GET' && (m = path.match(/\/issues\/(\d+)\/comments$/))) {
@@ -90,6 +92,7 @@ const ops = {
     }
     if (method === 'POST' && /\/issues\/\d+\/(labels|assignees)$/.test(path)) {
       if (!needInstallation()) return true;
+      if (path.endsWith('/assignees')) ops.assigned.add(Number(path.match(/\/issues\/(\d+)\//)![1]));
       send(200, {});
       return true;
     }

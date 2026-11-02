@@ -176,8 +176,6 @@ export class WorkflowEngine {
     projectId: string;
     title: string;
     request: string;
-    /** 人が画面で添えた指示（信頼できる入力）。Issue の本文は request に入れる */
-    guidance?: string | null;
     source: RunRow['source'];
     issueKey?: string | null;
     maxRevisionAttempts: number;
@@ -192,7 +190,6 @@ export class WorkflowEngine {
         projectId: args.projectId,
         title: args.title,
         request: args.request,
-        guidance: args.guidance ?? null,
         workflow: 'issue_to_draft_pr',
         runtime: args.runtime ?? 'simulated',
         source: args.source,
@@ -646,6 +643,7 @@ export class WorkflowEngine {
       title: run.title,
       request: run.request,
       guidance: run.guidance,
+      extraInstruction: run.source.delegateGuidance ?? null,
       repo: binding?.fullName ?? null,
       branch: branchFor(run.id),
       fixLoops: run.fixLoops,

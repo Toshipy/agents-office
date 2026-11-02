@@ -31,6 +31,7 @@ const gh = {
   pull: { state: 'open' as 'open' | 'closed', merged: false, headSha: 'sha-1' },
   reviews: [] as any[],
   failFor: null as string | null,
+  assigned: new Set<number>(),
 };
 const fakeGithub = {
   listIssuesWithLabel: vi.fn(async (_i: number, full: string) => {
@@ -38,9 +39,9 @@ const fakeGithub = {
     return gh.issues;
   }),
   lastLabeled: vi.fn(async () => (gh.labeledBy ? { login: gh.labeledBy, at: gh.labeledAt } : null)),
-  getIssue: vi.fn(async (_i: number, _f: string, n: number) => gh.issues.find((i) => i.number === n) ?? { number: n, title: 't', body: 'b', htmlUrl: 'u', labels: ['agents-office'], assignees: [], updatedAt: 'x' }),
+  getIssue: vi.fn(async (_i: number, _f: string, n: number) => ({ ...(gh.issues.find((i) => i.number === n) ?? { number: n, title: 't', body: 'b', htmlUrl: 'u', labels: ['agents-office'], updatedAt: 'x' }), assignees: gh.assigned.has(n) ? ['toshipy'] : [] })),
   listIssueComments: vi.fn(async () => []),
-  addAssignees: vi.fn(async () => undefined),
+  addAssignees: vi.fn(async (_i: number, _f: string, n: number) => void gh.assigned.add(n)),
   removeAssignees: vi.fn(async () => undefined),
   addLabels: vi.fn(async () => undefined),
   removeLabel: vi.fn(async () => undefined),
