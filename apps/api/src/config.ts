@@ -92,7 +92,7 @@ export interface ClaudeCodeConfig {
   allowApiBilling: boolean;
   maxTurns: { plan: number; review: number; develop: number };
   /** 起動時の検出結果（バージョン・ログイン方法）。未検出なら null */
-  detected: { version: string | null; loggedIn: boolean; authMethod: string | null; subscription: boolean; problem: string | null } | null;
+  detected: { version: string | null; loggedIn: boolean; authMethod: string | null; subscription: boolean; problem: string | null; supportsRestricted: boolean } | null;
 }
 
 export function parseRuntimeMode(v: string | undefined): 'auto' | AgentRuntime {
