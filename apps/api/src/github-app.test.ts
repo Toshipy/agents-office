@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { defaultClaudeCodeConfig, loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
-import { runs, webhookDeliveries } from './db/schema';
+import { approvals, runs, webhookDeliveries } from './db/schema';
 import { signGithubPayload } from './github/webhook';
 import { installFakeClaude } from './testing/fakeClaude';
 
@@ -465,7 +465,79 @@ describe('GitHub App integration (mock GitHub API + bare repo)', () => {
       expect(run.pr!.draft).toBe(false);
     } finally {
       prMock.mode = 'normal';
+      // flaky の PR 作成が積んだ open PR を残さない（後続のテストを決定的にする）
+      ops.openPulls = [];
     }
+  });
+
+  /** 人が GitHub の ai/ ブランチに 1 コミット足す（bare リポジトリへ plain git で push） */
+  function humanPush(branch: string, file: string, content: string) {
+    const work = join(tmp, `human-${randomUUID()}`);
+    execFileSync('git', ['clone', '-q', '-b', branch, origin, work]);
+    writeFileSync(join(work, file), content);
+    git(work, 'add', '-A');
+    git(work, '-c', 'user.name=Human', '-c', 'user.email=human@example.com', 'commit', '-q', '-m', 'human fix');
+    git(work, 'push', '-q', 'origin', `HEAD:refs/heads/${branch}`);
+    return git(work, 'rev-parse', 'HEAD');
+  }
+
+  async function runToReview(issue: number) {
+    await webhook('issues', issuePayload('toshipy', issue));
+    const created = await waitFor(async () => (await s.db.select().from(runs)).find((r) => r.issueKey === `${REPO_ID}#${issue}`));
+    return waitStatus(created.id, 'waiting_review', 'failed');
+  }
+
+  it('人が ai/ ブランチに足したコミットを取り込んでから修正し、PR を更新する', async () => {
+    fake.setScenario({
+      plan: [{ output: PLAN }],
+      develop: [
+        { writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Yo';\n" }] },
+        { writes: [{ path: 'src/greet2.ts', content: "export const greet2 = () => 'Yo!';\n" }] },
+      ],
+      review: [{ output: REVIEW }],
+    });
+    const run = await runToReview(9);
+    expect(run.status).toBe('waiting_review');
+    const branch = run.pr!.branch;
+    const humanSha = humanPush(branch, 'src/human.ts', 'export const human = 1;\n');
+    expect((await webhook('pull_request_review', reviewPayload('toshipy', 'changes_requested', run.pr!.headSha, run.pr!.number, '追加して'))).outcome).toBe('revision_started');
+    const revised = await waitFor(async () => {
+      const r = await runRow(run.id);
+      return r.status === 'waiting_review' && r.revisionCount === 1 ? r : (r.status === 'failed' ? r : null);
+    });
+    expect(revised.status).toBe('waiting_review');
+    const newSha = git(origin, 'rev-parse', `refs/heads/${branch}`);
+    expect(revised.pr!.headSha).toBe(newSha);
+    expect(git(origin, 'rev-parse', `${newSha}^`)).toBe(humanSha);
+    expect(git(origin, 'show', `${branch}:src/human.ts`)).toContain('human');
+    expect(git(origin, 'show', `${branch}:src/greet2.ts`)).toContain('Yo!');
+  });
+
+  it('人のコミットと worktree のコミットが分岐したら、Run を needs_input にして判断を求める', async () => {
+    fake.setScenario({
+      plan: [{ output: PLAN }],
+      develop: [{ writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Sup';\n" }] }],
+      review: [{ output: REVIEW }],
+    });
+    const run = await runToReview(10);
+    expect(run.status).toBe('waiting_review');
+    const branch = run.pr!.branch;
+    // 人が履歴を書き換えた（ai/ の先頭を main から作り直して別のコミットを置く）→ AI の履歴とは分岐する
+    const work = join(tmp, `human-${randomUUID()}`);
+    execFileSync('git', ['clone', '-q', '-b', 'main', origin, work]);
+    writeFileSync(join(work, 'other.txt'), 'diverged\n');
+    git(work, 'add', '-A');
+    git(work, '-c', 'user.name=Human', '-c', 'user.email=human@example.com', 'commit', '-q', '-m', 'diverge');
+    git(work, 'push', '-q', '--force', 'origin', `HEAD:refs/heads/${branch}`);
+    const headBefore = git(origin, 'rev-parse', `refs/heads/${branch}`);
+    expect((await webhook('pull_request_review', reviewPayload('toshipy', 'changes_requested', run.pr!.headSha, run.pr!.number, '直して'))).outcome).toBe('revision_started');
+    const paused = await waitStatus(run.id, 'needs_input', 'failed', 'waiting_review');
+    expect(paused.status).toBe('needs_input');
+    const [ap] = (await s.db.select().from(approvals)).filter((a) => a.runId === run.id && a.status === 'pending');
+    expect(ap.actionType).toBe('clarification');
+    expect(ap.payload.reason).toBe('branch_diverged');
+    // 人のブランチは壊していない
+    expect(git(origin, 'rev-parse', `refs/heads/${branch}`)).toBe(headBefore);
   });
 
   it('cancels the run when the PR is closed without merging, and rejects forged webhooks', async () => {

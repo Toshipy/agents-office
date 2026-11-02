@@ -766,6 +766,10 @@ export class WorkflowEngine {
       await this.pauseForUsageLimit(step, run, err);
       return;
     }
+    if (err instanceof RunnerError && err.code === 'BRANCH_DIVERGED') {
+      await this.pauseForBranchDiverged(step, run, err);
+      return;
+    }
     const code =
       err instanceof RunnerError
         ? err.code
@@ -1084,6 +1088,43 @@ export class WorkflowEngine {
       resetsAt: err.resetsAt,
       message: err.message,
       note: '上限がリセットされた後に「続行」を押すと、止まった工程から再開します。差し戻すとコメントを踏まえて計画からやり直し、却下すると Run を中止します。',
+    });
+  }
+
+  /**
+   * ai/ ブランチが GitHub 側（人のコミット）と分岐した工程を一時停止し、Run を needs_input にする。
+   * 自動では解消せず（強制 push も merge もしない）、人の判断を待つ。
+   */
+  private async pauseForBranchDiverged(step: StepRow, run: RunRow, err: RunnerError) {
+    const now = new Date();
+    await this.db.insert(stepLogs).values({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: step.id,
+      kind: 'error',
+      message: `${err.code}: ${err.message} — Run を一時停止し、判断待ちにします`,
+    });
+    const r = await this.transition(run.id, 'needs_input');
+    if (!r) {
+      await this.db.update(runSteps).set({ status: 'cancelled', finishedAt: now }).where(eq(runSteps.id, step.id));
+      return;
+    }
+    await this.db
+      .update(runSteps)
+      .set({ status: 'needs_input', errorCode: err.code, summary: err.message.slice(0, 300), finishedAt: now })
+      .where(eq(runSteps.id, step.id));
+    await this.bus.emit(
+      run.workspaceId,
+      'step.finished',
+      { stepId: step.id, key: step.key, role: step.role, status: 'needs_input', errorCode: err.code },
+      { runId: run.id, projectId: run.projectId },
+    );
+    await this.createApproval(r, 'clarification', 'planner', 'ブランチが GitHub 側と分岐しています', {
+      reason: 'branch_diverged',
+      pausedStepId: step.id,
+      stepKey: step.key,
+      message: err.message,
+      note: 'GitHub 上の ai/ ブランチと Run の履歴が分岐しています。GitHub 側を整理してから「差し戻し」でコメントを添えると計画からやり直します。却下すると Run を中止します。',
     });
   }
 

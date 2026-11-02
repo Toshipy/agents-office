@@ -192,6 +192,8 @@ export class ClaudeRunner implements AgentRunner {
   private async implement(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
     const worktree = wt.path;
     await ctx.tool('worktree.write', { branch: ctx.branch }, `隔離 worktree で作業: ${ctx.branch}`);
+    // 修正の前に、人が ai/ ブランチへ足したコミットを取り込む（取り込まずに push すると non-fast-forward になる）
+    if (ctx.revision > 0 && ctx.remote && this.opts.remoteHost) await this.opts.remoteHost.syncBranch(ctx, wt, ctx.remote, ctx.branch);
     const detail = ctx.previous.planDetail as PlanOutput | undefined;
     const feedback = [
       ctx.revision > 0 && ctx.guidance ? `PR レビューでの指摘（revision ${ctx.revision}）: ${ctx.guidance}` : '',

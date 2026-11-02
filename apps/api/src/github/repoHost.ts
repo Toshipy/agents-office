@@ -33,6 +33,8 @@ export interface RemoteRepoHost {
     remote: RemoteRepo,
     args: { branch: string; existing: { number: number; url: string } | null; title: string; body: string },
   ): Promise<{ number: number; url: string; headSha: string }>;
+  /** GitHub 上の ai/ ブランチに人が足したコミットを worktree へ取り込む。履歴が分岐していたら BRANCH_DIVERGED */
+  syncBranch(ctx: StepExecutionContext, wt: Worktree, remote: RemoteRepo, branch: string): Promise<'up_to_date' | 'fast_forwarded'>;
 }
 
 const ASKPASS = `#!/bin/sh
@@ -157,5 +159,45 @@ export class GithubRepoHost implements RemoteRepoHost {
     } catch (err) {
       throw githubRunnerError(err, 'PR を作成できません');
     }
+  }
+
+  async syncBranch(ctx: StepExecutionContext, wt: Worktree, remote: RemoteRepo, branch: string): Promise<'up_to_date' | 'fast_forwarded'> {
+    if (!/^ai\/[A-Za-z0-9._/-]+$/.test(branch)) throw new RunnerError('ai/ 以外のブランチは取り込みません', 'POLICY_DENIED', false);
+    const env = await this.gitEnv(remote.installationId);
+    const tracking = `refs/remotes/origin/${branch}`;
+    // 作業ツリーの .git は信用せず記録した gitDir を使い、取得先も取得済みのクローン URL を明示する（refs は共有オブジェクトストアに入る）
+    const fetch = wtArgs(wt, ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', remote.cloneUrl, `+refs/heads/${branch}:${tracking}`]);
+    const f = await run('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', ...fetch.args], {
+      cwd: fetch.cwd,
+      env,
+      timeoutMs: 10 * 60_000,
+      signal: ctx.signal,
+    });
+    if (f.code !== 0) {
+      // まだ GitHub に無いブランチなら、取り込むものは無い
+      if (/couldn't find remote ref/i.test(f.stderr)) return 'up_to_date';
+      throw new RunnerError(`ブランチ ${branch} を取得できません: ${f.stderr.trim().slice(-300)}`, 'GIT_FETCH_FAILED', true);
+    }
+    const git = async (args: string[]) => {
+      const a = wtArgs(wt, args);
+      return run('git', ['-c', 'core.hooksPath=/dev/null', ...a.args], { cwd: a.cwd, env: safeEnv(), timeoutMs: 120_000, signal: ctx.signal });
+    };
+    const remoteSha = (await git(['rev-parse', tracking])).stdout.trim();
+    const local = await headSha(wt);
+    if (remoteSha === local) return 'up_to_date';
+    // GitHub 側が worktree の祖先なら、人は何も足していない（AI の未 push 分が進んでいるだけ）
+    if ((await git(['merge-base', '--is-ancestor', remoteSha, 'HEAD'])).code === 0) return 'up_to_date';
+    // worktree が GitHub 側の祖先なら fast-forward で人のコミットを取り込む
+    if ((await git(['merge-base', '--is-ancestor', 'HEAD', remoteSha])).code === 0) {
+      const m = await git(['merge', '--ff-only', '--quiet', remoteSha]);
+      if (m.code !== 0) throw new RunnerError(`人のコミットを取り込めません: ${m.stderr.trim().slice(-300)}`, 'GIT_MERGE_FAILED', false);
+      await ctx.log(`GitHub の ${branch} に足された人のコミットを取り込みました（${remoteSha.slice(0, 7)}）`);
+      return 'fast_forwarded';
+    }
+    throw new RunnerError(
+      `ブランチ ${branch} は GitHub 側と履歴が分岐しています（GitHub: ${remoteSha.slice(0, 7)} / Run: ${local.slice(0, 7)}）。人の判断が必要です`,
+      'BRANCH_DIVERGED',
+      false,
+    );
   }
 }
