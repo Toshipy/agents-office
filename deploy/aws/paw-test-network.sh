@@ -7,12 +7,14 @@ set -euo pipefail
 
 # paw.service の PATH（/home/paw/.local/bin 先頭）を引き継がない。root 実行なので、paw が書ける場所は使わない
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# paw の HOME・Docker の設定（~/.docker、DOCKER_HOST など）を root の docker に読ませない
+export HOME=/root
+unset DOCKER_CONFIG DOCKER_CONTEXT DOCKER_HOST
 
 NET="${PAW_TEST_NETWORK:-paw-test}"
 # 既定のアドレス帯は Docker の既定（172.17〜）と重ならないように選ぶ。既にネットワークがあればその値を使う
 SUBNET_DEFAULT="${PAW_TEST_SUBNET:-172.31.250.0/24}"
 BRIDGE_DEFAULT="${PAW_TEST_BRIDGE:-paw-test0}"
-CHAIN=PAW-TEST
 
 # Docker が起動していなければネットワークを作れない
 for _ in $(seq 1 30); do
@@ -42,13 +44,23 @@ ip link show "$BRIDGE" >/dev/null 2>&1 || { echo "ブリッジ $BRIDGE が見つ
 
 # 規則は raw テーブルの PREROUTING に置く。filter の FORWARD/INPUT（Docker・Tailscale・ufw が順序を入れ替える）より前で
 # 評価されるので、他のサービスの再起動や規則の並びに左右されない。
-# 専用チェーン PAW-TEST を毎回作り直し、PREROUTING からの呼び出しが無ければ足す（再実行しても同じ状態になる）
+# 専用チェーンは PAW-TEST-A と PAW-TEST-B を交互に使う。新しい方を作り切ってから PREROUTING の呼び出しを差し替え、
+# 古い方を消すので、入れ直しの間も制限が途切れない（再実行しても同じ状態になる）
+if iptables -t raw -C PREROUTING -i "$BRIDGE" -j PAW-TEST-A 2>/dev/null; then
+  CHAIN=PAW-TEST-B
+else
+  CHAIN=PAW-TEST-A
+fi
 iptables -t raw -N "$CHAIN" 2>/dev/null || true
 iptables -t raw -F "$CHAIN"
 
 # 1) 名前解決: Docker の組み込み DNS は、コンテナの名前空間から上流のリゾルバへ問い合わせる。
-#    上流リゾルバ（VPC リゾルバなど。127.x のスタブは除く）への 53 番だけを許可する（DROP より先に評価される）
-resolvers="$(awk '/^nameserver[[:space:]]/ {print $2}' /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | sort -u || true)"
+#    上流リゾルバ（VPC リゾルバなど）への 53 番だけを許可する（DROP より先に評価される）。
+#    127.x のスタブと、tailnet（100.64.0.0/10。MagicDNS の 100.100.100.100 を含む）のリゾルバは許可しない。
+#    メタデータ 169.254.169.254 は、リゾルバとして書かれていても許可しない（VPC リゾルバの 169.254.169.253 は許可する）
+resolvers="$(awk '/^nameserver[[:space:]]/ {print $2}' /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null \
+  | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+  | grep -Ev '^127\.|^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|^169\.254\.169\.254$' | sort -u || true)"
 if [ -z "$resolvers" ]; then
   echo "警告: 上流の DNS リゾルバが見つかりません。コンテナの名前解決は失敗します" >&2
 fi
@@ -65,7 +77,15 @@ done
 # 3) ホスト自身のアドレス宛て（ゲートウェイ・インスタンスのアドレス・Tailscale のアドレスを含む）を落とす
 iptables -t raw -A "$CHAIN" -m addrtype --dst-type LOCAL -j DROP
 
-# このネットワークのブリッジから入ってきた通信だけを PAW-TEST で評価する
+# このネットワークのブリッジから入ってきた通信だけを新しいチェーンで評価する。先に新しい呼び出しを入れてから、古いものを消す
 iptables -t raw -C PREROUTING -i "$BRIDGE" -j "$CHAIN" 2>/dev/null || iptables -t raw -I PREROUTING 1 -i "$BRIDGE" -j "$CHAIN"
+for old in PAW-TEST PAW-TEST-A PAW-TEST-B; do
+  [ "$old" = "$CHAIN" ] && continue
+  while iptables -t raw -D PREROUTING -i "$BRIDGE" -j "$old" 2>/dev/null; do :; done
+  if iptables -t raw -S "$old" >/dev/null 2>&1; then
+    iptables -t raw -F "$old"
+    iptables -t raw -X "$old" 2>/dev/null || true
+  fi
+done
 
-echo "paw-test-network: $NET（$SUBNET、$BRIDGE）の通信制限を確認しました（DNS: ${resolvers:-なし}）"
+echo "paw-test-network: $NET（$SUBNET、$BRIDGE）の通信制限を確認しました（DNS: ${resolvers:-なし}、チェーン $CHAIN）"

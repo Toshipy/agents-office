@@ -142,7 +142,7 @@ sudo tailscale serve --bg --https=443 http://127.0.0.1:8787
 Tester 用のネットワークと通信制限（起動時に `paw.service` が毎回確認します）:
 
 ```bash
-sudo docker network ls | grep paw-test && sudo iptables -t raw -S PAW-TEST
+sudo docker network ls | grep paw-test && sudo iptables -t raw -S
 ```
 
 Tester の通信制限は、実機で次を確認してください（初回と、`sudo reboot` のあとにもう一度）。コマンドと期待する結果は [../README.md](../README.md) の手順 4b にあります（`getent hosts registry.npmjs.org` が成功し、`169.254.169.254` と tailnet の IP への `curl` が失敗すること）。
@@ -179,10 +179,11 @@ GitHub の Webhook は使わないので、App 側で設定することはあり
 
 ## 以前の版で作ったインスタンスの移行
 
-以前の bootstrap（Funnel で公開する版）で作った EC2 は、そのままでは新しい構成になりません。起動時スクリプトの変更は既存のインスタンスに反映されず（`ignore_changes = [user_data]`）、`paw-update` も古いままです。次のどちらかにします。
+以前の bootstrap（Funnel で公開する版）で作った EC2 は、そのままでは新しい構成になりません。起動時スクリプトの変更は既存のインスタンスに反映されず（`ignore_changes = [user_data]`）、`paw-update` も古いままです。作り直します。
 
-- **作り直す（簡単）:** `terraform apply -replace=aws_instance.this`。**DB・成果物は消えます**。必要なら先に `/var/lib/paw` のスナップショットを取る
-- **その場で直す:** サーバーで `sudo tailscale funnel reset`（インターネット公開を止める）→ `sudo tailscale serve --bg --https=443 http://127.0.0.1:8787` → `docker.io` と `iptables` を入れ、`sudo usermod -aG docker paw` → [../README.md](../README.md) の手順 4b（スクリプトの配置と実行）→ `paw.env` に `PAW_GITHUB_LOGIN`・`PAW_GITHUB_POLL_MS`・`PAW_TEST_SANDBOX=docker` などを足し、`PAW_GITHUB_WEBHOOK_SECRET` を消す → 新しい `paw.service` を `/etc/systemd/system/` に置いて `sudo systemctl daemon-reload && sudo systemctl restart paw`。以後の `paw-update` は、新しい版で置き直した後のものを使う（古い `paw-update` は通信制限スクリプトを入れ直さない）
+- **作り直す:** `terraform apply -replace=aws_instance.this`。**DB・成果物は消えます**。必要なら先に `/var/lib/paw` のスナップショットを取る
+
+その場で直す手順は用意していません。古い `paw-config-sync` と `/etc/paw-bootstrap/settings` が残り、実行のたびに設定が古い内容（Webhook secret あり、Docker の設定なし、制限モードなし）に戻って、サーバーモードの起動を拒むためです。
 
 ---
 

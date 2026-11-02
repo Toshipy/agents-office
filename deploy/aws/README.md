@@ -183,10 +183,10 @@ sudo /usr/local/sbin/paw-test-network
 
 `paw-test`（172.31.250.0/24）のネットワークができ、そこからの通信のうち、`10.0.0.0/8`・`172.16.0.0/12`・`192.168.0.0/16`・`169.254.0.0/16`（メタデータを含む）・`100.64.0.0/10`（tailnet）への通信と、ホスト自身への通信が落とされます。ただし名前解決のため、上流の DNS リゾルバ（VPC のリゾルバなど）への 53 番だけは、落とす規則より先に許可します。
 
-規則は iptables の **raw テーブル（PREROUTING）** の専用チェーン `PAW-TEST` にあります。Docker や Tailscale が filter テーブルの並びを入れ替えても、その前に評価されるので効きます。スクリプトは実行のたびにこのチェーンを作り直します（何度実行しても同じ状態になります）。確認:
+規則は iptables の **raw テーブル（PREROUTING）** の専用チェーン `PAW-TEST-A` / `PAW-TEST-B` にあります。Docker や Tailscale が filter テーブルの並びを入れ替えても、その前に評価されるので効きます。スクリプトは実行のたびに、使っていない方のチェーンを作り直して呼び出しを差し替え、古い方を消します（入れ直しの間も制限は途切れず、何度実行しても同じ状態になります）。確認:
 
 ```bash
-sudo iptables -t raw -S PREROUTING && sudo iptables -t raw -S PAW-TEST
+sudo iptables -t raw -S
 ```
 
 実機での確認（すべて Tester と同じ `paw-test` ネットワークのコンテナから。**初回の起動後と、再起動（`sudo reboot`）のあとにもう一度**行ってください）:
