@@ -10,6 +10,7 @@ import { IssueIntake } from './github/issueIntake';
 import { IssueCleanup } from './github/issueCleanup';
 import type { GithubApp } from './github/app';
 import { repositoryBindings, runs, workspaces } from './db/schema';
+import { SimulatedRunner } from './agents/simulated';
 
 const INSTALLATION_ID = 4242;
 const REPO_ID = 777002;
@@ -70,7 +71,11 @@ beforeAll(async () => {
       seedDemo: false,
       logLevel: 'silent',
       githubApp: { appId: '1', privateKeyPem: pem, apiUrl: 'http://127.0.0.1:1', allowedUsers: [LOGIN] },
+      // 実 Issue の Run はシミュレーションでは作らないため、実行基盤は claude_code にし、工程の中身だけシミュレーターで動かす
+      agentRuntimeMode: 'claude_code',
+      agentRuntime: 'claude_code',
     }),
+    { runner: new SimulatedRunner({ randomFailures: false }) },
   );
   app = createApp(s);
   const r = await app.request('/v1/auth/signup', { method: 'POST', headers: headers(), body: JSON.stringify({ username: 'owner', displayName: 'Owner', password: 'password-1234' }) });
@@ -87,6 +92,7 @@ beforeAll(async () => {
     fullName: FULL_NAME,
     automationEnabled: true,
     verification: 'github_app',
+    localPath: '/nonexistent/paw-managed/777002',
     policy: { triggerLabel: 'agents-office', events: ['issues.labeled'], maxRevisionAttempts: 3 },
   });
   [binding] = await s.db.select().from(repositoryBindings).where(eq(repositoryBindings.id, 'rb_intake'));
@@ -225,6 +231,17 @@ describe('IssueIntake.start の巻き戻しと安全', () => {
     const r = await intake.start(binding, 43, { via: 'ui', labeledBy: null, guidance: null });
     expect(r).toEqual({ skipped: 'assign_failed' });
     expect(state[0].labels).toEqual([]);
+    expect(await s.db.select().from(runs)).toHaveLength(0);
+  });
+
+  it('実行基盤がシミュレーションになる Run は作らず、GitHub にも触らない（runtime_unavailable）', async () => {
+    state = [mk(48)];
+    // 管理クローンのパスが無い接続は、Claude で実行できずシミュレーションになる
+    const r = await intake.start({ ...binding, localPath: null }, 48, { via: 'ui', labeledBy: null, guidance: null });
+    expect(r).toEqual({ skipped: 'runtime_unavailable' });
+    expect(fake.getIssue).not.toHaveBeenCalled();
+    expect(fake.addLabels).not.toHaveBeenCalled();
+    expect(fake.addAssignees).not.toHaveBeenCalled();
     expect(await s.db.select().from(runs)).toHaveLength(0);
   });
 

@@ -11,6 +11,7 @@ import { GithubPoller } from './github/poller';
 import { IssueIntake } from './github/issueIntake';
 import type { GithubApp } from './github/app';
 import { repositoryBindings, runs, webhookDeliveries, workspaces } from './db/schema';
+import { SimulatedRunner } from './agents/simulated';
 
 const INSTALLATION_ID = 4242;
 const REPO_ID = 777001;
@@ -58,7 +59,11 @@ beforeAll(async () => {
       seedDemo: false,
       logLevel: 'silent',
       githubApp: { appId: '1', privateKeyPem: pem, apiUrl: 'http://127.0.0.1:1', allowedUsers: ['toshipy'] },
+      // 実 Issue の Run はシミュレーションでは作らないため、実行基盤は claude_code にし、工程の中身だけシミュレーターで動かす
+      agentRuntimeMode: 'claude_code',
+      agentRuntime: 'claude_code',
     }),
+    { runner: new SimulatedRunner({ randomFailures: false }) },
   );
   // 実 GitHub を向く IssueIntake を、モックの GithubApp を使うものに差し替える
   (s.dispatcher as unknown as { intake: IssueIntake }).intake = new IssueIntake(s.db, s.engine, fakeGithub, 'toshipy');
@@ -89,6 +94,7 @@ beforeAll(async () => {
     fullName: FULL_NAME,
     automationEnabled: true,
     verification: 'github_app',
+    localPath: '/nonexistent/paw-managed/777001',
     policy: { triggerLabel: 'agents-office', events: ['issues.labeled'], maxRevisionAttempts: 3 },
   });
 });

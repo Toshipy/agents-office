@@ -123,6 +123,8 @@ export class IssueIntake {
     const gh = this.github;
     const login = this.login;
     if (real && (!gh || !login)) return { skipped: 'github_unavailable' };
+    // 実 Issue をシミュレーションの Run で扱わない（ラベル・アサインを付け、偽の PR 番号で実 PR を見てしまうため）
+    if (real && this.engine.runtimeFor(binding) === 'simulated') return { skipped: 'runtime_unavailable' };
 
     // 1. 手動ラベルは、自分が付けたものだけ
     if (real && opts.via === 'label' && (!opts.labeledBy || !same(opts.labeledBy, login!))) return { skipped: 'labeled_by_other' };

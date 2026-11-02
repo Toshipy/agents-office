@@ -31,6 +31,11 @@ describe('assertSafeServerConfig', () => {
     [{ claudeCode: { restricted: false, detected: { supportsRestricted: true } } }, 'PAW_CLAUDE_CODE_RESTRICTED'],
     [{ claudeCode: { restricted: true, detected: { supportsRestricted: false } } }, '--restricted'],
   ])('%o は起動を拒む', (patch, word) => expect(() => assertSafeServerConfig(cfg({ ...safe, ...patch }))).toThrow(word));
+  it('GitHub App があるのに実行基盤がシミュレーションなら起動を拒む', () => {
+    const githubApp = { appId: '1', privateKeyPem: 'x', apiUrl: 'https://api.github.com', allowedUsers: ['toshipy'] };
+    expect(() => assertSafeServerConfig(cfg({ ...safe, githubApp, agentRuntime: 'simulated', agentRuntimeReason: 'Claude Code にログインしていません' }))).toThrow(/GitHub App[\s\S]*シミュレーション[\s\S]*ログインしていません/);
+    expect(() => assertSafeServerConfig(cfg({ ...safe, githubApp }))).not.toThrow();
+  });
   it('複数の問題をまとめて返す', () =>
     expect(() => assertSafeServerConfig(cfg({ ...safe, signup: 'open', seedDemo: true }))).toThrow(/PAW_SIGNUP[\s\S]*PAW_SEED_DEMO/));
   it('claude_code 以外の実行基盤では --restricted の 2 項目を見ない', () =>

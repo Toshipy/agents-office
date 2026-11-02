@@ -22,6 +22,7 @@ const SKIP_TEXT: Record<string, string> = {
   not_an_issue: 'Issue ではなく PR のため任せられません',
   issue_closed: '閉じられた Issue のため任せられません',
   github_unavailable: 'GitHub に接続できないため見送りました',
+  runtime_unavailable: 'Claude で実行できない（シミュレーションになる）ため見送りました',
   labeled_by_other: '他の人が付けたラベルのため見送りました',
 };
 
