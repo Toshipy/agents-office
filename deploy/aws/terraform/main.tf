@@ -1,6 +1,6 @@
 # Personal AI Workspace を EC2 1 台で常時動かす構成。
 #  - 専用 VPC のパブリックサブネットに置くが、セキュリティグループで受信はすべて拒否（外向きの通信のみ）
-#  - 公開の入口は Tailscale Funnel（EC2 から Tailscale へ外向きに接続し、HTTPS を受ける）
+#  - 公開は tailnet の中だけ（tailscale serve。EC2 から Tailscale へ外向きに接続し、Funnel は使わない）
 #  - サーバーには SSM Session Manager で入る（SSH の鍵もポートも不要）
 #  - 秘密情報は SSM Parameter Store（SecureString）に置き、起動時に読む。Terraform の state には入れない
 
@@ -34,9 +34,9 @@ data "aws_ec2_instance_type_offerings" "available" {
 }
 
 locals {
-  az              = sort(data.aws_ec2_instance_type_offerings.available.locations)[0]
-  ssm_param_arn   = "arn:${data.aws_partition.current.partition}:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${var.ssm_prefix}"
-  bootstrap_vars  = <<-EOT
+  az             = sort(data.aws_ec2_instance_type_offerings.available.locations)[0]
+  ssm_param_arn  = "arn:${data.aws_partition.current.partition}:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${var.ssm_prefix}"
+  bootstrap_vars = <<-EOT
     #!/bin/bash
     # ---- Terraform から渡す設定（秘密情報は含めない） ----
     export PAW_REGION='${var.region}'

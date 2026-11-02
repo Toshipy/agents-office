@@ -8,7 +8,7 @@
 > Project にローカルの git リポジトリを指定すると、Claude が Run ごとの専用ブランチで計画 → 実装 → テスト → レビュー → Draft PR を進めます（「Claude で実行する」）。
 > どちらも無い場合や、ローカルリポジトリを指定していない Project はシミュレーションで動きます。
 >
-> **PC を閉じていても動かしたい場合**は、AWS の EC2 1 台で常時起動し、GitHub App で実際のリポジトリとつなげます（Issue にラベル → AI が作業 → Draft PR）。ドメインが無くても Tailscale Funnel で HTTPS の URL を用意できます。手順は [deploy/aws/README.md](deploy/aws/README.md)（手作業）と [deploy/aws/terraform/README.md](deploy/aws/terraform/README.md)（Terraform）にあります。
+> **PC を閉じていても動かしたい場合**は、AWS の EC2 1 台で常時起動し、GitHub App で実際のリポジトリとつなげます（Issue にラベル → AI が作業 → Draft PR）。画面は Tailscale のネットワーク内だけで開き（`tailscale serve`。インターネットには公開せず、GitHub の Webhook も受けず、サーバーが GitHub を見に行きます）、テストコマンドは Docker コンテナで動かします。手順は [deploy/aws/README.md](deploy/aws/README.md)（手作業）と [deploy/aws/terraform/README.md](deploy/aws/terraform/README.md)（Terraform）にあります。
 
 Agents Office のソースコード・3D モデル・固有デザイン・名称は使っていません（要求定義書 1.3 / ADR-015）。
 3D のキャラクター・机・島・ハブ・アイコンはすべてこのリポジトリ内のコードで作った独自のものです。
@@ -209,12 +209,38 @@ PAW_AGENT_RUNTIME=claude pnpm dev
 | 変数 | 内容 |
 |---|---|
 | `PAW_GITHUB_APP_ID` / `PAW_GITHUB_APP_PRIVATE_KEY_FILE` | GitHub App の ID と秘密鍵（.pem）のパス |
-| `PAW_GITHUB_WEBHOOK_SECRET` | App の Webhook secret と同じ値（16 文字以上。GitHub App 使用時は必須） |
+| `PAW_GITHUB_LOGIN` | 「自分担当」の Issue を判定する GitHub ログイン名（未設定なら `PAW_GITHUB_ALLOWED_USERS` の先頭） |
+| `PAW_GITHUB_POLL_MS` | GitHub を見に行く間隔（ミリ秒。既定 60000、最小 10000） |
+| `PAW_GITHUB_WEBHOOK` | `1` で署名付き Webhook の受け口を開く（開発用）。このときだけ `PAW_GITHUB_WEBHOOK_SECRET`（16 文字以上）が要る。本番では設定しない |
+| `PAW_TEST_SANDBOX` / `PAW_TEST_IMAGE` / `PAW_TEST_NETWORK` | Tester の実行方法（`docker` / `host`）、イメージ、Docker ネットワーク。サーバーモードは `docker` 必須 |
 | `PAW_GITHUB_ALLOWED_USERS` | Issue・レビューを受け付ける GitHub ユーザー（カンマ区切り） |
 | `PAW_PUBLIC_URL` | 公開 URL（HTTPS なら Cookie に Secure を付け、Origin を許可） |
 | `PAW_SIGNUP` | `open`（既定）/ `first_user`（最初の 1 人だけ）/ `closed` |
 | `PAW_SIGNUP_CODE` | 設定すると、新規登録にこのコードが必要（公開 URL で他人に先に登録されないように） |
 | `PAW_SERVE_WEB` | `1` で API からビルド済みの画面も配信 |
+
+#### GitHub App の作り方（agents-office 専用）
+
+他の App（meeting-note など）は使い回さず、agents-office 専用に作ります（秘密鍵が AI の動くサーバーに置かれるため、漏れたときの範囲を絞ります）。
+
+- **権限**: Contents・Pull requests・Issues は Read and write、Metadata は Read-only
+- **Webhook**: 無効（Active のチェックを外す）。イベントの購読も不要
+- **インストール**: **Only select repositories** で、AI に任せるリポジトリだけを選ぶ。組織（例 `fenrir-inc`）では**組織のオーナーの承認**が要る。案件が増えたらインストール先にリポジトリを足し、画面の Projects で Repo を接続する
+
+#### 常時運用の初回確認
+
+[deploy/aws/README.md](deploy/aws/README.md) の手順で起動したら、次を順に確かめます。
+
+1. サインインする（最初のユーザー `first_user` として、登録コードで登録）
+2. Projects で Repo を接続する（App を入れたリポジトリだけ選べる）
+3. 案件の Issue 一覧が出る（最大 60 秒）
+4. 影響の小さい Issue を 1 件「AI に任せる」
+5. 「GitHub に出す」の承認カードで差分を確かめて承認する
+6. PR ができる（本文は `Closes #<番号>` で始まる）
+
+#### Docker の権限（サーバー運用）
+
+Tester は Docker コンテナで動き、`paw` ユーザーを `docker` グループに入れます。**このグループはホストの root と同等の権限です。** それでも通常の Docker にしたのは、ホスト側の iptables（`DOCKER-USER`）でコンテナからホスト・内部ネットワーク・メタデータ・tailnet への通信を落とすためです（rootless Docker ではこの制限が効きません）。AI は `--restricted` で動かし、`docker` を呼ぶのはアプリだけにしています。詳細は [deploy/aws/README.md](deploy/aws/README.md) の手順 4b。
 
 ### ブラウザだけで動くデモ
 
