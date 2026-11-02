@@ -11,11 +11,12 @@ import { join } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { defaultClaudeCodeConfig, loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
-import { runSteps, runs, usageRecords } from './db/schema';
+import { approvals, runSteps, runs, usageRecords } from './db/schema';
 import { ClaudeCodeBackend } from './agents/claude/cliBackend';
 import { probeClaudeCode, resolveAgentRuntime } from './agents/claude/detect';
 import { RunnerError, type StepExecutionContext } from './agents/runner';
 import { FAKE_CLAUDE_CLI } from './testing/fakeClaude';
+import { decidePublish, pendingPublish } from './testing/publishApproval';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-cc-'));
 const repo = join(tmp, 'repo');
@@ -83,6 +84,14 @@ async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, timeo
 }
 const runRow = async (id: string) => (await s.db.select().from(runs).where(eq(runs.id, id)))[0];
 const waitStatus = (id: string, ...status: string[]) => waitFor(async () => (status.includes((await runRow(id)).status) ? runRow(id) : null));
+/** publish 承認（GitHub への書き込みの前の人の承認）を承認しながら、指定の状態まで待つ */
+const waitStatusApproving = (id: string, ...status: string[]) =>
+  waitFor(async () => {
+    const r = await runRow(id);
+    if (status.includes(r.status)) return r;
+    if (r.status === 'needs_input') await decidePublish(s.db, req, id);
+    return null;
+  });
 
 async function startRun(request = 'greet の文言を Hello, world に変更して') {
   const created = await req('POST', '/v1/runs', { projectId, request });
@@ -150,7 +159,7 @@ describe('Claude Code (subscription) runtime — fake CLI', () => {
   it('runs plan → implement → test → review → draft PR through `claude -p` with locked-down options', async () => {
     setScenario({ plan: [{ output: PLAN }], develop: [GOOD_DEV], review: [{ output: REVIEW }] });
     const runId = await startRun();
-    const run = await waitStatus(runId, 'waiting_review', 'failed');
+    const run = await waitStatusApproving(runId, 'waiting_review', 'failed');
     expect(run.status).toBe('waiting_review');
 
     // AI ブランチにコミットされ、元のリポジトリの main は変わっていない
@@ -253,7 +262,7 @@ describe('Claude Code (subscription) runtime — fake CLI', () => {
 
     const d = await req('POST', `/v1/approvals/${ap.id}/decision`, { decision: 'approve', expectedVersion: ap.version, confirmationDigest: ap.payloadDigest });
     expect(d.status).toBe(200);
-    const done = await waitStatus(runId, 'waiting_review', 'failed');
+    const done = await waitStatusApproving(runId, 'waiting_review', 'failed');
     expect(done.status).toBe('waiting_review');
     // 計画はやり直さず、止まった Developer の工程から再開している
     expect(counts()).toEqual({ plan: 1, develop: 2, review: 1 });
@@ -305,6 +314,78 @@ describe('Claude Code (subscription) runtime — fake CLI', () => {
       }
     }, 15000);
     expect((await runRow(runId)).status).toBe('cancelled');
+  });
+});
+
+// 2 回の Developer を通すため、並列実行で遅くなっても切れない上限にする
+describe('publish 承認（GitHub への書き込みの前の人の承認）', { timeout: 30_000 }, () => {
+  const branchOf = (runId: string) => `ai/run-${runId.slice(4, 14).toLowerCase()}`;
+
+  it('AI レビューが通ると needs_input で publish 承認を待ち、承認するまで PR を作らない', async () => {
+    setScenario({ plan: [{ output: PLAN }], develop: [GOOD_DEV], review: [{ output: REVIEW }] });
+    const runId = await startRun();
+    const paused = await waitStatus(runId, 'needs_input', 'failed', 'waiting_review');
+    expect(paused.status).toBe('needs_input');
+    expect(paused.pr).toBeNull();
+    const ap = await pendingPublish(s.db, runId);
+    expect(ap).not.toBeNull();
+    expect(ap!.actionType).toBe('publish');
+    expect(ap!.payload).toMatchObject({
+      kind: 'pull_request',
+      headSha: git(repo, 'rev-parse', branchOf(runId)).trim(),
+      title: paused.title,
+      labels: { remove: [], add: [] },
+      update: false,
+    });
+    expect(String(ap!.payload.diffSha256)).toMatch(/^[0-9a-f]{64}$/);
+    expect(String(ap!.payload.body)).toContain('この PR は agents-office が作りました。マージは人が行います。');
+    // 画面からの指示の Run（Issue なし）は Closes 行を付けない
+    expect(String(ap!.payload.body)).not.toContain('Closes #');
+    // 期限は 72 時間（作成時刻は DB の既定値、期限はエンジンの時計なので数秒の誤差を許す）
+    expect(Math.abs(ap!.expiresAt.getTime() - ap!.createdAt.getTime() - 72 * 3600_000)).toBeLessThan(5_000);
+    const before = await s.db.select().from(runSteps).where(eq(runSteps.runId, runId));
+    expect(before.some((x) => x.key === 'draft_pr')).toBe(false);
+
+    await decidePublish(s.db, req, runId);
+    const done = await waitStatus(runId, 'waiting_review', 'failed');
+    expect(done.status).toBe('waiting_review');
+    expect(done.pr!.headSha).toBe(ap!.payload.headSha);
+    const [decided] = await s.db.select().from(approvals).where(eq(approvals.id, ap!.id));
+    expect(decided.status).toBe('approved');
+  });
+
+  it('差し戻すと指示を付けて implement が再び動き、新しい publish 承認の headSha が変わる', async () => {
+    setScenario({
+      plan: [{ output: PLAN }],
+      develop: [GOOD_DEV, { writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Hello, world!';\n" }], text: '! を足しました' }],
+      review: [{ output: REVIEW }],
+    });
+    const runId = await startRun();
+    expect((await waitStatus(runId, 'needs_input', 'failed')).status).toBe('needs_input');
+    const first = (await pendingPublish(s.db, runId))!;
+    await decidePublish(s.db, req, runId, 'request_changes', '末尾に ! を付けて');
+    const second = await waitFor(async () => {
+      const ap = await pendingPublish(s.db, runId);
+      return ap && ap.id !== first.id ? ap : null;
+    });
+    expect(counts().develop).toBe(2);
+    expect(calls().filter((c) => c.purpose === 'develop')[1].stdin).toContain('末尾に ! を付けて');
+    expect(second.payload.headSha).not.toBe(first.payload.headSha);
+    expect(second.payload.headSha).toBe(git(repo, 'rev-parse', branchOf(runId)).trim());
+    expect((await runRow(runId)).status).toBe('needs_input');
+    expect((await runRow(runId)).pr).toBeNull();
+    const [old] = await s.db.select().from(approvals).where(eq(approvals.id, first.id));
+    expect(old.status).toBe('changes_requested');
+  });
+
+  it('却下すると PR を作らずに Run を中止する', async () => {
+    setScenario({ plan: [{ output: PLAN }], develop: [GOOD_DEV], review: [{ output: REVIEW }] });
+    const runId = await startRun();
+    expect((await waitStatus(runId, 'needs_input', 'failed')).status).toBe('needs_input');
+    await decidePublish(s.db, req, runId, 'reject');
+    const run = await waitStatus(runId, 'cancelled', 'failed', 'waiting_review');
+    expect(run.status).toBe('cancelled');
+    expect(run.pr).toBeNull();
   });
 });
 

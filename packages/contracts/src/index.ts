@@ -114,9 +114,10 @@ export type StepKey = (typeof STEP_KEYS)[number];
 /**
  * pr_review / dangerous_operation は基本設計書 11.1。
  * clarification は UC-05（要件不足・再修正上限超過時のエスカレーション）を表すためにローカル版で追加。
+ * publish は GitHub への書き込み（push・PR の作成と更新）の前に人が内容を確かめる承認。
  * send_message / publish_document は P1 のため未実装。
  */
-export const APPROVAL_ACTION_TYPES = ['pr_review', 'dangerous_operation', 'clarification'] as const;
+export const APPROVAL_ACTION_TYPES = ['pr_review', 'dangerous_operation', 'clarification', 'publish'] as const;
 export type ApprovalActionType = (typeof APPROVAL_ACTION_TYPES)[number];
 
 export const APPROVAL_STATUSES = [
@@ -483,4 +484,5 @@ export const APPROVAL_TYPE_LABEL: Record<ApprovalActionType, string> = {
   pr_review: 'Draft PR レビュー',
   dangerous_operation: '危険操作の検知',
   clarification: '判断・追加指示が必要',
+  publish: 'GitHub への書き込み',
 };

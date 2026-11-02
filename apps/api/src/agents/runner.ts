@@ -97,3 +97,25 @@ export class UsageLimitError extends RunnerError {
     super(message, 'CLAUDE_USAGE_LIMIT', false);
   }
 }
+
+/** publish 承認で人に見せる PR の中身（AI レビューが通った時点の worktree から作る） */
+export interface PublishPreview {
+  headSha: string;
+  /** base からの差分（patch）の SHA-256（16 進） */
+  diffSha256: string;
+  title: string;
+  body: string;
+}
+
+/**
+ * PR の工程で、worktree の HEAD が人の承認した headSha と違った。承認していない内容は push しない。
+ * エンジンは Run を失敗にせず、preview（今の HEAD）で publish 承認を作り直す。
+ */
+export class PublishStaleError extends RunnerError {
+  constructor(
+    message: string,
+    readonly preview: PublishPreview,
+  ) {
+    super(message, 'PUBLISH_STALE', false);
+  }
+}

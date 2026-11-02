@@ -9,15 +9,17 @@
  *  - Planner / Reviewer: 構造化出力で計画とレビュー結果を JSON で受け取る
  *  - Developer: Run ごとの隔離 worktree でファイルを変更。終了後に変更パスを検査し、禁止パスへの変更があれば破棄
  *  - Tester: 利用者が Project に設定したコマンドだけを worktree で実行（シェルは使わない）
- *  - PR: ローカル版は worktree のブランチを PR とみなす（GitHub への push は未接続）
+ *  - PR: 人の publish 承認の後にだけ push・PR 作成を行う。承認した head と worktree の HEAD が違えば何もしない
+ *    （GitHub App 連携のない Repo は worktree のブランチを PR とみなす）
  *
  * 依頼本文・Issue・リポジトリ内容は非信頼入力として扱い、ツールポリシーは変更しない（基本設計書 9.3）。
  */
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { PATTERNS, detectDangerous } from '@paw/sim-content';
-import type { AgentRunner, StepExecutionContext, StepOutput } from '../runner';
-import { RunnerError } from '../runner';
+import type { AgentRunner, PublishPreview, StepExecutionContext, StepOutput } from '../runner';
+import { PublishStaleError, RunnerError } from '../runner';
+import { sha256Hex } from '../../lib/crypto';
 import { assertGitLink, changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, worktreeExists, type Worktree } from './git';
 import type { RemoteRepoHost } from '../../github/repoHost';
 import type { ModelBackend } from './shared';
@@ -25,6 +27,43 @@ import type { TestSandbox } from './testSandbox';
 import { DEVELOPER_SYSTEM, PLANNER_SYSTEM, PlanOutput, REVIEWER_SYSTEM, ReviewOutput, bullet } from './shared';
 
 const MAX_DIFF_FOR_REVIEW = 200 * 1024;
+
+/** PR 本文・成果物に書くテスト結果の 1 行 */
+function testsLineOf(previous: Record<string, unknown>): string {
+  if (previous.testsSkipped) return '未実行（コマンド未設定）';
+  return previous.testsPassed === false ? '✗ 失敗' : '✓ 通過';
+}
+
+/**
+ * GitHub に出す PR の本文（副作用なし）。publish 承認で人に見せる本文と、承認後に PR へ書く本文は同じものを使う。
+ * 1 行目は Issue のある Run だけ `Closes #<番号>`。
+ */
+export function buildPullRequestBody(args: {
+  issueNumber: number | null;
+  developerSummary: string;
+  reviewSummary: string;
+  testsLine: string;
+  filesChanged: number;
+  runId: string;
+}): string {
+  return [
+    ...(args.issueNumber ? [`Closes #${args.issueNumber}`, ''] : []),
+    '## 内容',
+    '',
+    args.developerSummary,
+    '',
+    '## AI レビュー',
+    '',
+    args.reviewSummary,
+    '',
+    `- テスト: ${args.testsLine}`,
+    `- 変更: ${args.filesChanged} ファイル`,
+    '',
+    '---',
+    `Run \`${args.runId}\``,
+    'この PR は agents-office が作りました。マージは人が行います。',
+  ].join('\n');
+}
 
 export interface ClaudeRunnerOptions {
   worktreesDir: string;
@@ -359,16 +398,43 @@ export class ClaudeRunner implements AgentRunner {
     ].join('\n');
     await ctx.tool('review.write', {}, approved ? `指摘: blocker 0 / nit ${review.nits.length}` : `blocker ${blockers.length} 件`);
     await ctx.artifact('review', 'AI レビュー', 'review.md', 'text/markdown', md);
+    // 通ったときは、エンジンが publish 承認に載せる PR の中身（head・差分のハッシュ・タイトル・本文）を返す
+    const publish = approved ? await this.publishPreview(ctx, wt, review.summary) : undefined;
     return {
       status: 'succeeded',
       summary: approved ? 'PR 提出可（人間の承認ではない）' : `blocker ${blockers.length} 件（差し戻し）`,
-      outcome: { approved, blockers, nits: review.nits, reviewSummary: review.summary },
+      outcome: { approved, blockers, nits: review.nits, reviewSummary: review.summary, ...(publish ? { publish } : {}) },
+    };
+  }
+
+  /** 今の worktree（HEAD・base からの差分）から、publish 承認で人に見せる PR の中身を作る */
+  private async publishPreview(ctx: StepExecutionContext, wt: Worktree, reviewSummary: string): Promise<PublishPreview> {
+    const diff = await diffFromBase(wt, wt.baseSha);
+    return {
+      headSha: await headSha(wt),
+      diffSha256: sha256Hex(diff.patch),
+      title: ctx.title,
+      body: buildPullRequestBody({
+        issueNumber: ctx.issueNumber,
+        developerSummary: String(ctx.previous.developerSummary ?? ctx.title),
+        reviewSummary,
+        testsLine: testsLineOf(ctx.previous),
+        filesChanged: diff.files.length,
+        runId: ctx.runId,
+      }),
     };
   }
 
   private async pullRequest(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
     // push・PR 作成の前に、作業ツリーの .git が書き換えられていないことを確かめる
     await assertGitLink(wt);
+    // 人が publish 承認で確かめた head と今の HEAD が違えば、承認していない内容なので何も書かない（エンジンが承認を作り直す）
+    const approved = ctx.previous.publish as { headSha?: unknown; title?: unknown; body?: unknown } | undefined;
+    const head = await headSha(wt);
+    if (!approved || approved.headSha !== head) {
+      await ctx.log(`承認した head（${String(approved?.headSha ?? 'なし').slice(0, 12)}）と worktree の HEAD（${head.slice(0, 12)}）が違うため、push せず承認を取り直します`, 'error');
+      throw new PublishStaleError('承認した内容から worktree の HEAD が変わっています', await this.publishPreview(ctx, wt, String(ctx.previous.reviewSummary ?? '')));
+    }
     const update = ctx.key === 'update_pr' && ctx.pr !== null;
     const remote = ctx.remote;
     const push = await ctx.tool('github.branch.push', { repo: ctx.repo, branch: ctx.branch }, `ブランチを確定: ${ctx.branch}${remote ? '（GitHub に push）' : '（ローカル）'}`);
@@ -381,37 +447,20 @@ export class ClaudeRunner implements AgentRunner {
     );
     if (!res.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${res.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
     const diff = await diffFromBase(wt, wt.baseSha);
-    const testsSkipped = Boolean(ctx.previous.testsSkipped);
-    const testsLine = testsSkipped ? '未実行（コマンド未設定）' : ctx.previous.testsPassed === false ? '✗ 失敗' : '✓ 通過';
+    const testsLine = testsLineOf(ctx.previous);
     let pr: { number: number; url: string; branch: string; headSha: string; draft: false };
     if (remote) {
-      const body = [
-        ...(ctx.issueNumber ? [`Closes #${ctx.issueNumber}`, ''] : []),
-        '## 内容',
-        '',
-        String(ctx.previous.developerSummary ?? ctx.title),
-        '',
-        '## AI レビュー',
-        '',
-        String(ctx.previous.reviewSummary ?? ''),
-        '',
-        `- テスト: ${testsLine}`,
-        `- 変更: ${diff.files.length} ファイル`,
-        '',
-        '---',
-        `Run \`${ctx.runId}\``,
-        'この PR は agents-office が作りました。マージは人が行います。',
-      ].join('\n');
+      // タイトル・本文は人が承認したものをそのまま使う
       const published = await this.opts.remoteHost!.publish(ctx, wt, remote, {
         branch: ctx.branch,
         existing: update ? { number: ctx.pr!.number, url: ctx.pr!.url } : null,
-        title: ctx.title,
-        body,
+        title: String(approved.title ?? ctx.title),
+        body: String(approved.body ?? ''),
       });
       pr = { number: published.number, url: published.url, branch: ctx.branch, headSha: published.headSha, draft: false };
     } else {
       const number = update ? ctx.pr!.number : await ctx.allocatePrNumber();
-      pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: await headSha(wt), draft: false };
+      pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: head, draft: false };
     }
     const md = [
       `# ${update ? 'PR 更新' : 'PR 作成'} — #${pr.number}`,

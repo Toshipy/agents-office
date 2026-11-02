@@ -176,6 +176,8 @@ describe('AT-006 / AT-007 Issue → Draft PR → review loop', () => {
     expect(d.body.usage.measurement).toBe('estimated');
     const ap = d.body.approvals[0];
     expect(ap.actionType).toBe('pr_review');
+    // simulated の Run は何も書かないため、publish 承認を通らずに PR の工程へ進む（Ruling 3）
+    expect(d.body.approvals.some((x: any) => x.actionType === 'publish')).toBe(false);
     // PR レビューは GitHub 側で行う
     const direct = await a.json('POST', `/v1/approvals/${ap.id}/decision`, { decision: 'approve', expectedVersion: ap.version, confirmationDigest: ap.payloadDigest });
     expect(direct.status).toBe(409);

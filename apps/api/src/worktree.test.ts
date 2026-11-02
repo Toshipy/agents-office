@@ -110,4 +110,22 @@ describe('worktree', () => {
     } as unknown as StepExecutionContext;
     await expect(runner.execute(ctx)).rejects.toMatchObject({ code: 'GIT_LINK_TAMPERED' });
   });
+
+  it('PR の工程は、承認した headSha と worktree の HEAD が違えば何も呼ばずに PUBLISH_STALE で止まる', async () => {
+    const runner = new ClaudeRunner({ worktreesDir: wtDir, testTimeoutMs: 1000, testSandbox: {} as never, backend: {} as never });
+    const tools: string[] = [];
+    const ctx = {
+      runId: 'run_p', stepId: 's1', key: 'draft_pr', attempt: 1, branch: 'ai/run-p', runtime: 'claude', signal: new AbortController().signal,
+      title: 't', issueNumber: null, pr: null, repo: null,
+      previous: { publish: { kind: 'pull_request', headSha: '0'.repeat(40), diffSha256: 'x', title: 't', body: 'b', labels: { remove: [], add: [] }, update: false } },
+      localRepo: { path: repo, testCommand: null, testImage: null }, remote: null,
+      tool: async (name: string) => (tools.push(name), { allowed: true, reason: '' }), log: async () => undefined, artifact: async () => undefined,
+      allocatePrNumber: async () => 1,
+    } as unknown as StepExecutionContext;
+    const err = await runner.execute(ctx).catch((e) => e);
+    expect(err).toMatchObject({ code: 'PUBLISH_STALE', retryable: false });
+    // 作り直す承認のために、今の HEAD を返す
+    expect(err.preview.headSha).toBe(await headSha(await ensureWorktree(repo, wtDir, 'run_p', 'ai/run-p')));
+    expect(tools).toEqual([]);
+  });
 });

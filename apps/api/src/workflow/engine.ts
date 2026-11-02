@@ -39,8 +39,8 @@ import { newId } from '../lib/ids';
 import { digestPayload } from '../lib/crypto';
 import { log } from '../lib/logger';
 import { Mutex } from '../lib/mutex';
-import type { AgentRunner, StepExecutionContext, StepOutput } from '../agents/runner';
-import { RunnerCrashError, RunnerError, UsageLimitError } from '../agents/runner';
+import type { AgentRunner, PublishPreview, StepExecutionContext, StepOutput } from '../agents/runner';
+import { PublishStaleError, RunnerCrashError, RunnerError, UsageLimitError } from '../agents/runner';
 import type { ArtifactStore } from './artifactStore';
 import { authorizeTool } from './toolBroker';
 
@@ -55,6 +55,7 @@ const APPROVAL_TTL_MS: Record<ApprovalActionType, number> = {
   pr_review: 14 * 24 * 3600_000,
   dangerous_operation: 72 * 3600_000,
   clarification: 72 * 3600_000,
+  publish: 72 * 3600_000,
 };
 
 const PlanSchema = z.object({
@@ -589,6 +590,16 @@ export class WorkflowEngine {
         if (Array.isArray(o.blockers) && o.blockers.length) previous.lastFailure = (o.blockers as string[]).join(' / ');
       }
     }
+    // PR の工程には、人が最後に承認した publish の内容を渡す（Runner は承認した head と worktree の HEAD を照合する）
+    if (step.key === 'draft_pr' || step.key === 'update_pr') {
+      const [approved] = await this.db
+        .select({ payload: approvals.payload })
+        .from(approvals)
+        .where(and(eq(approvals.runId, run.id), eq(approvals.actionType, 'publish'), eq(approvals.status, 'approved')))
+        .orderBy(desc(approvals.decidedAt))
+        .limit(1);
+      if (approved) previous.publish = approved.payload;
+    }
     return { step: updated, run: current, binding: binding ?? null, agent, previous };
   }
 
@@ -770,6 +781,10 @@ export class WorkflowEngine {
       await this.pauseForBranchDiverged(step, run, err);
       return;
     }
+    if (err instanceof PublishStaleError) {
+      await this.reRequestPublish(step, run, err);
+      return;
+    }
     const code =
       err instanceof RunnerError
         ? err.code
@@ -894,7 +909,9 @@ export class WorkflowEngine {
         const ok = step.key === 'test' ? o.passed === true : o.approved === true;
         if (ok) {
           if (step.key === 'test') await this.addStep(run, 'review', 'reviewer', run.revisionCount);
-          else await this.addStep(run, run.pr ? 'update_pr' : 'draft_pr', 'tool_broker', run.revisionCount);
+          // simulated の Run は何も書かないため、承認を挟まずに PR の工程へ進む
+          else if (run.runtime === 'simulated') await this.addStep(run, run.pr ? 'update_pr' : 'draft_pr', 'tool_broker', run.revisionCount);
+          else await this.requestPublish(run, o.publish);
           return;
         }
         if (run.fixLoops < MAX_FIX_LOOPS) {
@@ -1033,6 +1050,79 @@ export class WorkflowEngine {
     // 工程側の終了処理も Run のロックを取るため、待つのはロックの外
     await this.waitFlights(flights);
     return result;
+  }
+
+  /**
+   * GitHub に書く前（push・PR の作成と更新の前）に、Run を needs_input にして publish 承認を作る。
+   * 承認するまで PR の工程は足さない。preview は AI レビューが通った時点の worktree から Runner が作る。
+   */
+  private async requestPublish(run: RunRow, preview: unknown) {
+    const p = preview as Partial<PublishPreview> | undefined;
+    if (!p || typeof p.headSha !== 'string' || typeof p.diffSha256 !== 'string' || typeof p.title !== 'string' || typeof p.body !== 'string') {
+      await this.failRun(run.id, 'PUBLISH_PREVIEW_MISSING', 'publish 承認に載せる PR の内容がありません');
+      return;
+    }
+    const r = await this.transition(run.id, 'needs_input');
+    if (!r) return;
+    const update = r.pr !== null;
+    await this.createApproval(r, 'publish', 'reviewer', update ? `PR #${r.pr!.number} の更新を GitHub に書き込む` : 'PR を GitHub に作る', {
+      kind: 'pull_request',
+      headSha: p.headSha,
+      diffSha256: p.diffSha256,
+      title: p.title,
+      body: p.body,
+      // 終わりのラベル操作は後の工程で足す。今は何も変えない
+      labels: { remove: [] as string[], add: [] as string[] },
+      update,
+    });
+  }
+
+  /** 承認した head と worktree の HEAD が違った PR の工程を終え、今の HEAD で publish 承認を作り直す。Run は失敗にしない */
+  private async reRequestPublish(step: StepRow, run: RunRow, err: PublishStaleError) {
+    const now = new Date();
+    await this.db.insert(stepLogs).values({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: step.id,
+      kind: 'error',
+      message: `${err.code}: ${err.message} — push せず、publish 承認を作り直します`,
+    });
+    await this.db
+      .update(runSteps)
+      .set({ status: 'cancelled', errorCode: err.code, summary: err.message.slice(0, 300), finishedAt: now })
+      .where(eq(runSteps.id, step.id));
+    await this.bus.emit(
+      run.workspaceId,
+      'step.finished',
+      { stepId: step.id, key: step.key, role: step.role, status: 'cancelled', errorCode: err.code },
+      { runId: run.id, projectId: run.projectId },
+    );
+    const [cur] = await this.db.select().from(runs).where(eq(runs.id, run.id));
+    if (!cur || TERMINAL_RUN_STATUSES.includes(cur.status)) return;
+    await this.requestPublish(cur, err.preview);
+  }
+
+  /**
+   * publish 承認の判断を反映する（却下＝中止は呼び出し側が cancelRun で行う）。
+   *  - 承認: validating に戻し、PR の工程（draft_pr / update_pr）を足す
+   *  - 差し戻し: コメントを指示として running にし、implement からやり直す（AI レビュー → publish 承認をもう一度通る）
+   */
+  async resumeAfterPublish(runId: string, decision: 'approve' | 'request_changes', comment: string | null): Promise<RunRow | null> {
+    const [cur] = await this.db.select().from(runs).where(eq(runs.id, runId));
+    if (!cur || cur.status !== 'needs_input') return null;
+    if (decision === 'approve') {
+      const r = await this.transition(runId, 'validating');
+      if (r) await this.addStep(r, r.pr ? 'update_pr' : 'draft_pr', 'tool_broker', r.revisionCount);
+      return r;
+    }
+    // 人の差し戻しは修正サイクルとして数える（Developer への指示に revision を付けて渡すため）
+    const r = await this.transition(runId, 'running', {
+      guidance: comment?.slice(0, 2000) || '人の差し戻しへの対応',
+      revisionCount: cur.revisionCount + 1,
+      fixLoops: 0,
+    });
+    if (r) await this.addStep(r, 'implement', 'developer', r.revisionCount);
+    return r;
   }
 
   /** needs_input からの再開（人の判断: 承認 / 差し戻し）。計画からやり直す */

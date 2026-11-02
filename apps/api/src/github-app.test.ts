@@ -16,9 +16,10 @@ import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { defaultClaudeCodeConfig, loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
-import { approvals, runs, webhookDeliveries } from './db/schema';
+import { approvals, runSteps, runs, webhookDeliveries } from './db/schema';
 import { signGithubPayload } from './github/webhook';
 import { installFakeClaude } from './testing/fakeClaude';
+import { decidePublish, pendingPublish } from './testing/publishApproval';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-gh-'));
 const dataRoot = join(tmp, 'data');
@@ -259,6 +260,18 @@ async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, timeo
 }
 const runRow = async (id: string) => (await s.db.select().from(runs).where(eq(runs.id, id)))[0];
 const waitStatus = (id: string, ...st: string[]) => waitFor(async () => (st.includes((await runRow(id)).status) ? runRow(id) : null));
+/** publish 承認（GitHub への書き込みの前の人の承認）を承認しながら、指定の状態まで待つ */
+const waitStatusApproving = (id: string, ...st: string[]) =>
+  waitFor(async () => {
+    const r = await runRow(id);
+    if (st.includes(r.status)) return r;
+    if (r.status === 'needs_input') await decidePublish(s.db, req, id);
+    return null;
+  });
+const branchOf = (runId: string) => `ai/run-${runId.slice(4, 14).toLowerCase()}`;
+/** bare リポジトリ（GitHub の代わり）にそのブランチが push されているか */
+const remoteHasBranch = (branch: string) => git(origin, 'for-each-ref', '--format=%(refname)', `refs/heads/${branch}`) !== '';
+const pullPosts = () => requests.filter((r) => r.method === 'POST' && r.path === `/repos/${FULL_NAME}/pulls`).length;
 
 const repository = { id: REPO_ID, full_name: FULL_NAME };
 const installation = { id: INSTALLATION_ID };
@@ -345,7 +358,8 @@ afterAll(async () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-describe('GitHub App integration (mock GitHub API + bare repo)', () => {
+// publish 承認を挟むぶん長くなるため、並列実行で遅くなっても切れない上限にする
+describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_000 }, () => {
   it('connects only repositories where the App is installed, using the real repository id and default branch', async () => {
     const missing = await req('POST', `/v1/projects/${projectId}/repositories`, { fullName: 'someone/else' });
     expect(missing.status).toBe(422);
@@ -397,6 +411,17 @@ describe('GitHub App integration (mock GitHub API + bare repo)', () => {
     expect(accepted.outcome).toBe('run_created');
     const [created] = await s.db.select().from(runs);
     expect(created.runtime).toBe('claude_code');
+
+    // AI レビューが通っても、publish 承認の前は GitHub に書かない（push も PR 作成もしない）
+    const paused = await waitStatus(created.id, 'needs_input', 'failed', 'waiting_review');
+    expect(paused.status).toBe('needs_input');
+    expect(pullPosts()).toBe(0);
+    expect(remoteHasBranch(branchOf(created.id))).toBe(false);
+    const ap = await pendingPublish(s.db, created.id);
+    expect(ap!.payload).toMatchObject({ kind: 'pull_request', title: '#5 greet の文言を変更', update: false });
+    expect(String(ap!.payload.body).split('\n')[0]).toBe('Closes #5');
+    await decidePublish(s.db, req, created.id);
+
     const run = await waitStatus(created.id, 'waiting_review', 'failed');
     expect(run.status).toBe('waiting_review');
 
@@ -432,6 +457,8 @@ describe('GitHub App integration (mock GitHub API + bare repo)', () => {
     expect((await webhook('pull_request_review', reviewPayload('toshipy', 'changes_requested', remoteSha, 12, '末尾に ! を付けて'))).outcome).toBe('revision_started');
     const revised = await waitFor(async () => {
       const r = await runRow(run.id);
+      // 修正後の PR 更新も publish 承認を通る
+      if (r.status === 'needs_input') await decidePublish(s.db, req, run.id);
       return r.status === 'waiting_review' && r.revisionCount === 1 ? r : null;
     });
     const newSha = git(origin, 'rev-parse', `refs/heads/${branch}`);
@@ -455,7 +482,7 @@ describe('GitHub App integration (mock GitHub API + bare repo)', () => {
     prMock.posts = 0;
     try {
       await webhook('issues', issuePayload('toshipy', 8));
-      const run = await waitStatus((await waitFor(async () => (await s.db.select().from(runs)).find((r) => r.issueKey === `${REPO_ID}#8`))).id, 'waiting_review', 'failed');
+      const run = await waitStatusApproving((await waitFor(async () => (await s.db.select().from(runs)).find((r) => r.issueKey === `${REPO_ID}#8`))).id, 'waiting_review', 'failed');
       expect(run.status).toBe('waiting_review');
       expect(pulls.length - before).toBe(1);
       const made = pulls[pulls.length - 1];
@@ -484,7 +511,7 @@ describe('GitHub App integration (mock GitHub API + bare repo)', () => {
   async function runToReview(issue: number) {
     await webhook('issues', issuePayload('toshipy', issue));
     const created = await waitFor(async () => (await s.db.select().from(runs)).find((r) => r.issueKey === `${REPO_ID}#${issue}`));
-    return waitStatus(created.id, 'waiting_review', 'failed');
+    return waitStatusApproving(created.id, 'waiting_review', 'failed');
   }
 
   it('人が ai/ ブランチに足したコミットを取り込んでから修正し、PR を更新する', async () => {
@@ -503,6 +530,7 @@ describe('GitHub App integration (mock GitHub API + bare repo)', () => {
     expect((await webhook('pull_request_review', reviewPayload('toshipy', 'changes_requested', run.pr!.headSha, run.pr!.number, '追加して'))).outcome).toBe('revision_started');
     const revised = await waitFor(async () => {
       const r = await runRow(run.id);
+      if (r.status === 'needs_input') await decidePublish(s.db, req, run.id);
       return r.status === 'waiting_review' && r.revisionCount === 1 ? r : (r.status === 'failed' ? r : null);
     });
     expect(revised.status).toBe('waiting_review');
@@ -551,17 +579,55 @@ describe('GitHub App integration (mock GitHub API + bare repo)', () => {
     const recoveredSha = git(work2, 'rev-parse', 'HEAD');
     const done = await req('POST', `/v1/approvals/${ap.id}/decision`, { decision: 'approve', expectedVersion: ap.version, confirmationDigest: ap.payloadDigest });
     expect(done.status).toBe(200);
-    const after = await waitStatus(run.id, 'waiting_review', 'failed');
+    const after = await waitStatusApproving(run.id, 'waiting_review', 'failed');
     expect(after.status).toBe('waiting_review');
     // 人の直した履歴を土台にしたまま（取りこぼし・force push なし）
     expect(git(origin, 'show', `${branch}:recovered.txt`)).toContain('ok');
     expect(git(origin, 'merge-base', '--is-ancestor', recoveredSha, `refs/heads/${branch}`)).toBe('');
   });
 
+  it('承認と工程の間に worktree の HEAD が動いたら push せず、publish 承認を作り直す', async () => {
+    fake.setScenario({ plan: [{ output: PLAN }], develop: [{ writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Howdy';\n" }] }], review: [{ output: REVIEW }] });
+    await webhook('issues', issuePayload('toshipy', 11));
+    const created = await waitFor(async () => (await s.db.select().from(runs)).find((r) => r.issueKey === `${REPO_ID}#11`));
+    expect((await waitStatus(created.id, 'needs_input', 'failed', 'waiting_review')).status).toBe('needs_input');
+    const first = (await pendingPublish(s.db, created.id))!;
+    const branch = branchOf(created.id);
+    // 承認した後・PR の工程の前に HEAD が動いた状況を作る（worktree に 1 コミット足す）
+    const wt = join(dataRoot, 'worktrees', created.id);
+    writeFileSync(join(wt, 'late.txt'), 'late\n');
+    git(wt, 'add', 'late.txt');
+    git(wt, 'commit', '-q', '-m', 'late change');
+    const moved = git(wt, 'rev-parse', 'HEAD');
+    expect(first.payload.headSha).not.toBe(moved);
+    const postsBefore = pullPosts();
+
+    await decidePublish(s.db, req, created.id);
+    const second = await waitFor(async () => {
+      const ap = await pendingPublish(s.db, created.id);
+      return ap && ap.id !== first.id ? ap : null;
+    });
+    // push も PR 作成もせず、動いた後の HEAD で承認を作り直す（Run は失敗にしない）
+    expect(second.payload.headSha).toBe(moved);
+    expect((await runRow(created.id)).status).toBe('needs_input');
+    expect(remoteHasBranch(branch)).toBe(false);
+    expect(pullPosts()).toBe(postsBefore);
+    const stale = (await s.db.select().from(runSteps).where(eq(runSteps.runId, created.id))).filter((x) => x.key === 'draft_pr');
+    expect(stale.map((x) => x.errorCode)).toEqual(['PUBLISH_STALE']);
+
+    // 作り直した承認を承認すると、その HEAD を push して PR を作る
+    await decidePublish(s.db, req, created.id);
+    const run = await waitStatus(created.id, 'waiting_review', 'failed');
+    expect(run.status).toBe('waiting_review');
+    expect(run.pr!.headSha).toBe(moved);
+    expect(git(origin, 'rev-parse', `refs/heads/${branch}`)).toBe(moved);
+  });
+
   it('cancels the run when the PR is closed without merging, and rejects forged webhooks', async () => {
     fake.setScenario({ plan: [{ output: PLAN }], develop: [{ writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Hi';\n" }] }], review: [{ output: REVIEW }] });
     await webhook('issues', issuePayload('toshipy', 6));
-    const run = await waitFor(async () => (await s.db.select().from(runs)).find((r) => r.issueKey === `${REPO_ID}#6` && r.status === 'waiting_review'));
+    const created = await waitFor(async () => (await s.db.select().from(runs)).find((r) => r.issueKey === `${REPO_ID}#6`));
+    const run = await waitStatusApproving(created.id, 'waiting_review');
     const closed = await webhook('pull_request', { action: 'closed', pull_request: { number: run.pr!.number, merged: false }, repository, installation, sender: { login: 'toshipy' } });
     expect(closed.outcome).toBe('run_cancelled_pr_closed');
     expect((await runRow(run.id)).status).toBe('cancelled');
