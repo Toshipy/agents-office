@@ -240,7 +240,7 @@ PAW_AGENT_RUNTIME=claude pnpm dev
 
 #### Docker の権限（サーバー運用）
 
-Tester は Docker コンテナで動き、`paw` ユーザーを `docker` グループに入れます。**このグループはホストの root と同等の権限です。** それでも通常の Docker にしたのは、ホスト側の iptables（`DOCKER-USER`）でコンテナからホスト・内部ネットワーク・メタデータ・tailnet への通信を落とすためです（rootless Docker ではこの制限が効きません）。AI は `--restricted` で動かし、`docker` を呼ぶのはアプリだけにしています。詳細は [deploy/aws/README.md](deploy/aws/README.md) の手順 4b。
+Tester は Docker コンテナで動き、`paw` ユーザーを `docker` グループに入れます。**このグループはホストの root と同等の権限です。** それでも通常の Docker にしたのは、ホスト側の iptables（raw テーブル）でコンテナからホスト・内部ネットワーク・メタデータ・tailnet への通信を落とすためです（rootless Docker ではこの制限が効きません）。AI は `--restricted` で動かし、`docker` を呼ぶのはアプリだけにしています。詳細は [deploy/aws/README.md](deploy/aws/README.md) の手順 4b。
 
 ### ブラウザだけで動くデモ
 

@@ -16,7 +16,7 @@ PAW_SSM_PREFIX='${PAW_SSM_PREFIX}'
 PAW_GITHUB_APP_ID='${PAW_GITHUB_APP_ID}'
 PAW_GITHUB_ALLOWED_USERS='${PAW_GITHUB_ALLOWED_USERS}'
 PAW_TS_HOSTNAME='${PAW_TS_HOSTNAME}'
-PAW_CLAUDE_CODE_RESTRICTED='0'
+PAW_CLAUDE_CODE_RESTRICTED='1'
 EOF
 chmod 644 /etc/paw-bootstrap/settings
 
@@ -117,7 +117,8 @@ echo "設定を更新しました（公開 URL: ${public_url}）"
 SYNC
 chmod 755 /usr/local/bin/paw-config-sync
 
-# Tester 用ネットワークと通信制限のスクリプト。paw が書き換えられないよう、root 所有の場所へコピーして使う
+# Tester 用ネットワークと通信制限のスクリプト。root で実行されるため、paw が直接書ける場所からではなく、
+# root 所有の場所（/usr/local/sbin）へ、bootstrap と paw-update が root としてコピーしたものを使う
 install_test_network() {
   install -o root -g root -m 755 /home/paw/agents-office/deploy/aws/paw-test-network.sh /usr/local/sbin/paw-test-network
 }
@@ -177,14 +178,14 @@ if out="$(check_claude '' 2>&1)"; then
   log "Claude Code の確認（通常）: 成功 — ${out:0:120}"
 else
   log "Claude Code の確認（通常）: 失敗 — ${out: -300}"
-  log "サブスクのトークン（${PAW_SSM_PREFIX}/claude_code_oauth_token）を確認してください。アプリは起動しますが、Claude の工程は失敗します"
+  log "サブスクのトークン（${PAW_SSM_PREFIX}/claude_code_oauth_token）を確認してください。直すまで Claude の工程は失敗します"
 fi
+# サーバーモードは --restricted が必須（0 にはしない）。試行が失敗しても 1 のままにし、原因を直すよう促す
 if out="$(check_claude '--restricted' 2>&1)"; then
-  sed -i "s/^PAW_CLAUDE_CODE_RESTRICTED=.*/PAW_CLAUDE_CODE_RESTRICTED='1'/" /etc/paw-bootstrap/settings
-  /usr/local/bin/paw-config-sync
-  log "制限モード（--restricted）で動くため有効にしました"
+  log "制限モード（--restricted）の確認: 成功"
 else
-  log "制限モード（--restricted）は使わずに動かします（PAW_CLAUDE_CODE_RESTRICTED=0）— ${out: -200}"
+  log "制限モード（--restricted）の確認: 失敗 — ${out: -200}"
+  log "サーバーモードは --restricted が必須のため、無効にはしません。トークン（${PAW_SSM_PREFIX}/claude_code_oauth_token）や Claude Code を直してから sudo paw-config-sync && sudo systemctl restart paw を実行してください"
 fi
 
 # ---- 常時起動 ----

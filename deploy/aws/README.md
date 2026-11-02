@@ -15,7 +15,7 @@ GitHub ◀── 承認後だけ push・PR・Issue コメント（GitHub App の
 EC2 は外からの接続を受け付けません（受信ポートは SSH だけ、それも自分の IP に限定）。GitHub からの Webhook も受けず、サーバーが GitHub を定期的に見に行くので、インターネットから届く口はありません。
 
 > **確認状況**
-> - アプリ: 利用者の Mac で、本物の GitHub とサブスクの Claude Code を使い「依頼 → 計画 → 実装 → AI レビュー → GitHub に Draft PR」まで動作を確認済み（旧構成）。Issue のポーリング、承認後の PR 作成、Docker の Tester は、テストまでの確認で、EC2 での実機は未確認です（手順 12 の確認で確かめてください）。
+> - アプリ: 利用者の Mac で、本物の GitHub とサブスクの Claude Code を使い「依頼 → 計画 → 実装 → AI レビュー → GitHub に Draft PR」まで動作を確認済み（旧構成）。Issue のポーリング、承認後の PR 作成、Docker の Tester は、テストまでの確認で、EC2 での実機は未確認です（手順 11 の確認で確かめてください）。
 > - Tailscale: コマンドは Tailscale の CLI のヘルプ文で確認した範囲です。`tailscale serve` の構文（`--bg --https=443 http://127.0.0.1:8787`）と、HTTPS 証明書の有効化の画面は実機で未確認です。表示が手順と違う場合は、画面の案内を優先してください。
 
 ## 必要なもの
@@ -171,7 +171,7 @@ tailscale serve status
 
 Tester は、AI が書き換えたテストやスクリプトを動かします。秘密（`/etc/paw/paw.env`・GitHub App の秘密鍵）が見えないよう、作業コピーだけをマウントしたコンテナで動かし、そのコンテナからホストと内部ネットワークへ届かないようにします。依存の取得のためインターネットへは出られます。
 
-制限は root 所有のスクリプトで入れ、`paw.service` が起動のたびに実行します（`paw` が書き換えられない場所に置きます）:
+制限は root で動くスクリプトで入れ、`paw.service` が起動のたびに実行します。root で実行されるので、`/usr/local/sbin`（root 所有）に、root として置いたコピーを使います（`paw` が書ける `/home/paw` のスクリプトを直接は実行しません。更新は `sudo install` で置き直します）:
 
 ```bash
 sudo install -o root -g root -m 755 /home/paw/agents-office/deploy/aws/paw-test-network.sh /usr/local/sbin/paw-test-network
@@ -181,11 +181,30 @@ sudo install -o root -g root -m 755 /home/paw/agents-office/deploy/aws/paw-test-
 sudo /usr/local/sbin/paw-test-network
 ```
 
-`paw-test`（172.31.250.0/24）のネットワークができ、そこからの通信のうち、`10.0.0.0/8`・`172.16.0.0/12`・`192.168.0.0/16`・`169.254.0.0/16`（メタデータを含む）・`100.64.0.0/10`（tailnet）への転送と、ホスト自身への通信が落とされます。何度実行しても同じ状態になります。確認:
+`paw-test`（172.31.250.0/24）のネットワークができ、そこからの通信のうち、`10.0.0.0/8`・`172.16.0.0/12`・`192.168.0.0/16`・`169.254.0.0/16`（メタデータを含む）・`100.64.0.0/10`（tailnet）への通信と、ホスト自身への通信が落とされます。ただし名前解決のため、上流の DNS リゾルバ（VPC のリゾルバなど）への 53 番だけは、落とす規則より先に許可します。
+
+規則は iptables の **raw テーブル（PREROUTING）** の専用チェーン `PAW-TEST` にあります。Docker や Tailscale が filter テーブルの並びを入れ替えても、その前に評価されるので効きます。スクリプトは実行のたびにこのチェーンを作り直します（何度実行しても同じ状態になります）。確認:
 
 ```bash
-sudo iptables -S DOCKER-USER && sudo iptables -S INPUT | grep 172.31.250
+sudo iptables -t raw -S PREROUTING && sudo iptables -t raw -S PAW-TEST
 ```
+
+実機での確認（すべて Tester と同じ `paw-test` ネットワークのコンテナから。**初回の起動後と、再起動（`sudo reboot`）のあとにもう一度**行ってください）:
+
+```bash
+# 名前解決はできる（失敗するなら DNS の許可規則を確認）
+sudo docker run --rm --network paw-test node:22-bookworm getent hosts registry.npmjs.org
+# インターネットには出られる
+sudo docker run --rm --network paw-test node:22-bookworm curl -sS -m 10 -o /dev/null -w '%{http_code}\n' https://registry.npmjs.org/
+# メタデータ・tailnet・ホストには届かない（どれもタイムアウトで失敗すれば OK）
+sudo docker run --rm --network paw-test node:22-bookworm curl -sS -m 5 http://169.254.169.254/latest/meta-data/
+sudo docker run --rm --network paw-test node:22-bookworm curl -sS -m 5 http://$(tailscale ip -4):8787/
+sudo docker run --rm --network paw-test node:22-bookworm curl -sS -m 5 http://172.31.250.1:8787/
+# 例: 手元の tailnet の別の端末の IP（tailscale status で確認）にも届かない
+sudo docker run --rm --network paw-test node:22-bookworm curl -sS -m 5 http://<tailnet 内の別の端末の IP>/
+```
+
+`docker`・`tailscaled` を再起動したあとも同じ結果になることを確認してください（規則は iptables の raw テーブルにあり、どちらの再起動でも消えません。ネットワークを作り直したときは `sudo systemctl restart paw` で規則が入り直ります）。
 
 Tester のイメージを先に取得しておきます:
 
@@ -197,13 +216,13 @@ sudo docker pull node:22-bookworm
 
 `docker` グループに入れたユーザーは、ホストの root と同等の操作ができます（任意のパスをマウントしたコンテナを作れるため）。この構成は、`paw` ユーザー（API と Claude Code が動く）をこのグループに入れます。
 
-- 採った理由: Tester を「コンテナに閉じ込めて、ホストの内部ネットワークへ出さない」には、ホスト側の iptables（`DOCKER-USER`）で縛れる通常の Docker が必要です。rootless Docker はネットワークがユーザー空間で動き、この規則が使えず、`169.254.169.254` や tailnet を落とす手段が弱くなるため採りませんでした。
+- 採った理由: Tester を「コンテナに閉じ込めて、ホストの内部ネットワークへ出さない」には、ホスト側の iptables（raw テーブル）で縛れる通常の Docker が必要です。rootless Docker はネットワークがユーザー空間で動き、この規則が使えず、`169.254.169.254` や tailnet を落とす手段が弱くなるため採りませんでした。
 - 残るリスク: `paw` として任意のコードが動けば、ホスト全体を奪えます。そのため、AI は `--restricted`（Bash などコードを動かすツールなし）で動かし、`docker` を呼ぶのはアプリだけ（引数はアプリが固定。作業コピーだけをマウント、`--cap-drop` 等で権限を落とす）にしています。EC2 自体も受信ポートなし・tailnet 内だけの公開です。
 - もっと強くしたいとき: Tester だけ別のホスト・別の VM に分ける（このリポジトリでは未対応）。
 
 ## 5. GitHub App を作る（ブラウザ）
 
-**agents-office 専用の App を新しく作ります**（meeting-note など他の App は使い回しません。秘密鍵は AI が動く EC2 に置くため、漏れたときの範囲を絞ります）。https://github.com/settings/apps/new（組織のものにするなら組織の Settings → Developer settings → GitHub Apps）を開きます。
+**agents-office 専用の App を新しく作ります**（meeting-note など他の App は使い回しません。秘密鍵は AI が動く EC2 に置くため、漏れたときの範囲を絞ります）。個人のリポジトリだけなら https://github.com/settings/apps/new、組織のリポジトリを扱うなら組織の Developer settings（下の 4）で作ります。
 
 1. **GitHub App name**: 例 `agents-office-<自分の名前>`。**Homepage URL**: 適当な URL（このリポジトリの URL など）
 2. **Webhook**: **Active のチェックを外す**（Webhook は受けません。サーバーが 60 秒ごとに GitHub を見に行きます）
@@ -217,7 +236,7 @@ sudo docker pull node:22-bookworm
    | Metadata | Read-only（自動で付く） |
 
    イベントの購読（Subscribe to events）は不要です。
-4. **Where can this GitHub App be installed?**: 自分のアカウントだけで使うなら **Only on this account**
+4. **Where can this GitHub App be installed?**: 作る場所で変わります。**組織（`fenrir-inc` など）のリポジトリを扱うなら、組織の Settings → Developer settings → GitHub Apps で作り**（その場合 **Only on this account** は「その組織」だけの意味になり、組織のリポジトリに入れられます）、個人アカウントで作るなら **Any account** にして、組織側の承認を受けます。個人アカウントで **Only on this account** にすると、組織のリポジトリには入れられません
 5. **Create GitHub App** のあと、**General → Private keys → Generate a private key** で鍵を作る（ダウンロードされる .pem はサーバー用。手元に残さない）
 6. App ID は **General → About** の数字
 7. **Install App** で、対象のリポジトリに入れます。**Only select repositories** を選び、AI に任せたいリポジトリだけを選びます（案件が増えたらここに足し、画面の Projects で Repo を接続します）
@@ -291,8 +310,8 @@ sudo -H -u paw bash -c 'set -a; . /etc/paw/paw.env; set +a; cd /tmp && ~/.local/
 sudo -H -u paw bash -c 'set -a; . /etc/paw/paw.env; set +a; cd /tmp && ~/.local/bin/claude -p "ok とだけ返して" --restricted'
 ```
 
-- 認証エラーになる → `/etc/paw/paw.env` の `PAW_CLAUDE_CODE_RESTRICTED=0` のまま（手元の Mac ではこの設定で動作確認済み）
-- `ok` と返る → `1` にすると、Claude Code が利用者・リポジトリの設定を読まない、より制限の強い起動になります
+- 認証エラーになる → トークンか Claude Code の問題です。サーバーモードは `PAW_CLAUDE_CODE_RESTRICTED=1`（`--restricted`）が必須で、`0` では起動を拒みます。原因を直してください
+- `ok` と返る → そのまま進めて構いません（`paw.env.example` は `1` です）
 
 ## 9. 起動する（サーバー上）
 

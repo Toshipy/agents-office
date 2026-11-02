@@ -1,7 +1,0 @@
-# Caddy（HTTPS 証明書を自動で取得・更新するリバースプロキシ）の設定
-# 配置先: /etc/caddy/Caddyfile。paw.example.com を自分のドメインに置き換える
-paw.example.com {
-	encode zstd gzip
-	# API は 127.0.0.1:8787 でだけ待ち受ける（外から直接は届かない）
-	reverse_proxy 127.0.0.1:8787
-}

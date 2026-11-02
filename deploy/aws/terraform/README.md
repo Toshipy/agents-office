@@ -69,8 +69,9 @@ aws sts get-caller-identity
    - **Repository permissions**: Contents / Pull requests / Issues を **Read and write**、Metadata を Read-only
    - イベントの購読は不要
 2. 作成後、**General → Private keys → Generate a private key** で鍵を作る（サーバー用）。App ID は **General → About** の数字
-3. **Install App** で、**Only select repositories** を選び、AI に任せるリポジトリだけに入れる。組織（`fenrir-inc` など）のリポジトリには、**組織のオーナーの承認**が要る（リクエストを出して承認してもらう）。案件が増えたらここにリポジトリを足し、画面の Projects で Repo を接続する
-4. 別のターミナルでサブスクのトークンを作る（ブラウザで承認すると表示される）
+3. 作る場所: **組織（`fenrir-inc` など）のリポジトリを扱うなら組織の Settings → Developer settings → GitHub Apps で作る**（Only on this account は組織を指す）。個人アカウントで作るなら **Any account** にして組織の承認を受ける。個人で Only on this account にすると組織のリポジトリには入れられない
+4. **Install App** で、**Only select repositories** を選び、AI に任せるリポジトリだけに入れる。組織（`fenrir-inc` など）のリポジトリには、**組織のオーナーの承認**が要る（リクエストを出して承認してもらう）。案件が増えたらここにリポジトリを足し、画面の Projects で Repo を接続する
+5. 別のターミナルでサブスクのトークンを作る（ブラウザで承認すると表示される）
 
 ```bash
 claude setup-token
@@ -141,8 +142,10 @@ sudo tailscale serve --bg --https=443 http://127.0.0.1:8787
 Tester 用のネットワークと通信制限（起動時に `paw.service` が毎回確認します）:
 
 ```bash
-sudo docker network ls | grep paw-test && sudo iptables -S DOCKER-USER
+sudo docker network ls | grep paw-test && sudo iptables -t raw -S PAW-TEST
 ```
+
+Tester の通信制限は、実機で次を確認してください（初回と、`sudo reboot` のあとにもう一度）。コマンドと期待する結果は [../README.md](../README.md) の手順 4b にあります（`getent hosts registry.npmjs.org` が成功し、`169.254.169.254` と tailnet の IP への `curl` が失敗すること）。
 
 公開 URL は手元の Mac からも確認できます:
 
@@ -156,7 +159,7 @@ aws ssm get-parameter --region ap-northeast-1 --name /paw/public_url --query Par
 
 GitHub の Webhook は使わないので、App 側で設定することはありません（Webhook は無効のままにしておく）。サーバーの `/etc/paw/paw.env` には、起動時スクリプトが次を入れています。
 
-- `PAW_SIGNUP=first_user`・`PAW_SEED_DEMO=0`・`PAW_DEV_ROUTES=0`・`PAW_CLAUDE_CODE_RESTRICTED=1`（制限モードが使えないときは起動を拒みます）
+- `PAW_SIGNUP=first_user`・`PAW_SEED_DEMO=0`・`PAW_DEV_ROUTES=0`・`PAW_CLAUDE_CODE_RESTRICTED=1`（常に 1 です。`--restricted` の確認が失敗してもログに出すだけで、0 にはしません。0 だと起動を拒むため、トークンなどの原因を直します）
 - `PAW_GITHUB_LOGIN`（`github_allowed_users` の先頭）・`PAW_GITHUB_POLL_MS=60000`
 - `PAW_TEST_SANDBOX=docker`・`PAW_TEST_IMAGE=node:22-bookworm`・`PAW_TEST_NETWORK=paw-test`
 
@@ -174,13 +177,20 @@ GitHub の Webhook は使わないので、App 側で設定することはあり
 
 詳しい確認と、うまくいかないときは [../README.md](../README.md) の手順 11 と「うまくいかないとき」を見てください。
 
+## 以前の版で作ったインスタンスの移行
+
+以前の bootstrap（Funnel で公開する版）で作った EC2 は、そのままでは新しい構成になりません。起動時スクリプトの変更は既存のインスタンスに反映されず（`ignore_changes = [user_data]`）、`paw-update` も古いままです。次のどちらかにします。
+
+- **作り直す（簡単）:** `terraform apply -replace=aws_instance.this`。**DB・成果物は消えます**。必要なら先に `/var/lib/paw` のスナップショットを取る
+- **その場で直す:** サーバーで `sudo tailscale funnel reset`（インターネット公開を止める）→ `sudo tailscale serve --bg --https=443 http://127.0.0.1:8787` → `docker.io` と `iptables` を入れ、`sudo usermod -aG docker paw` → [../README.md](../README.md) の手順 4b（スクリプトの配置と実行）→ `paw.env` に `PAW_GITHUB_LOGIN`・`PAW_GITHUB_POLL_MS`・`PAW_TEST_SANDBOX=docker` などを足し、`PAW_GITHUB_WEBHOOK_SECRET` を消す → 新しい `paw.service` を `/etc/systemd/system/` に置いて `sudo systemctl daemon-reload && sudo systemctl restart paw`。以後の `paw-update` は、新しい版で置き直した後のものを使う（古い `paw-update` は通信制限スクリプトを入れ直さない）
+
 ---
 
 ## 運用
 
 | こと | コマンド（サーバーに入ってから） |
 |---|---|
-| アプリを最新にする | `sudo paw-update`（通信制限のスクリプトと `paw.service` も入れ直します） |
+| アプリを最新にする | `sudo paw-update`（この版の bootstrap で作ったインスタンスでは、通信制限のスクリプトと `paw.service` も入れ直します） |
 | 秘密情報を更新した後 | `sudo paw-config-sync && sudo systemctl restart paw` |
 | ログを見る | `sudo journalctl -u paw -f` |
 | 起動時の準備をやり直す | `sudo bash /var/lib/cloud/instance/user-data.txt` |
