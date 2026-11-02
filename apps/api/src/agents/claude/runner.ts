@@ -347,7 +347,8 @@ export class ClaudeRunner implements AgentRunner {
   }
 
   private async pullRequest(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
-    const worktree = wt.path;
+    // push・PR 作成の前に、作業ツリーの .git が書き換えられていないことを確かめる
+    await assertGitLink(wt);
     const update = ctx.key === 'update_pr' && ctx.pr !== null;
     const remote = ctx.remote;
     const push = await ctx.tool('github.branch.push', { repo: ctx.repo, branch: ctx.branch }, `ブランチを確定: ${ctx.branch}${remote ? '（GitHub に push）' : '（ローカル）'}`);
@@ -381,7 +382,7 @@ export class ClaudeRunner implements AgentRunner {
         `Personal AI Workspace の Run \`${ctx.runId}\` が作成した Draft PR です。マージするかどうかは人が判断してください（AI はマージしません）。`,
         '',
       ].join('\n');
-      const published = await this.opts.remoteHost!.publish(ctx, worktree, remote, {
+      const published = await this.opts.remoteHost!.publish(ctx, wt, remote, {
         branch: ctx.branch,
         existing: update ? { number: ctx.pr!.number, url: ctx.pr!.url } : null,
         title: ctx.title,

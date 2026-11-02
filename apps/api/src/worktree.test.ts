@@ -5,8 +5,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { GithubRepoHost } from './github/repoHost';
 import { assertGitLink, changedPaths, ensureWorktree, headSha, removeWorktree } from './agents/claude/git';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-wt-'));
@@ -61,5 +63,32 @@ describe('worktree', () => {
     const wt = await ensureWorktree(repo, wtDir, 'run_e', 'ai/run-e');
     await removeWorktree(repo, wt.path, wt.branch);
     expect(existsSync(`${wt.path}.gitlink`)).toBe(false);
+  });
+
+  it('.git を別の有効な git dir に向け直すと、再取得で GIT_LINK_TAMPERED になる（作り直さない）', async () => {
+    const wt = await ensureWorktree(repo, wtDir, 'run_f', 'ai/run-f');
+    writeFileSync(join(wt.path, '.git'), `gitdir: ${join(repo, '.git')}\n`);
+    await expect(ensureWorktree(repo, wtDir, 'run_f', 'ai/run-f')).rejects.toMatchObject({ code: 'GIT_LINK_TAMPERED' });
+    expect(existsSync(`${wt.path}.gitlink`)).toBe(true);
+  });
+
+  it('リンクが無傷で git の管理情報が壊れた worktree は作り直す', async () => {
+    const wt = await ensureWorktree(repo, wtDir, 'run_g', 'ai/run-g');
+    rmSync(join(repo, '.git', 'worktrees', basename(wt.gitDir)), { recursive: true, force: true });
+    const again = await ensureWorktree(repo, wtDir, 'run_g', 'ai/run-g');
+    expect(await headSha(again)).toBe(again.baseSha);
+  });
+
+  it('publish は .git が書き換えられていても記録した gitDir で push する', async () => {
+    const bare = join(tmp, 'remote.git');
+    execFileSync('git', ['init', '-q', '--bare', bare]);
+    const wt = await ensureWorktree(repo, wtDir, 'run_h', 'ai/run-h');
+    writeFileSync(join(wt.path, '.git'), 'gitdir: /tmp/elsewhere\n');
+    const host = new GithubRepoHost({ installationToken: async () => 't', createDraftPullRequest: async () => ({ number: 1, htmlUrl: 'u' }) } as never, join(tmp, 'data'));
+    const ctx = { log: async () => undefined, signal: new AbortController().signal } as never;
+    const remote = { provider: 'github', installationId: 1, repositoryId: 1, fullName: 'o/r', defaultBranch: 'main', cloneUrl: bare } as const;
+    const res = await host.publish(ctx, wt, remote, { branch: 'ai/run-h', existing: null, title: 't', body: 'b' });
+    expect(res.headSha).toBe(wt.baseSha);
+    expect(git(bare, 'rev-parse', 'refs/heads/ai/run-h').trim()).toBe(wt.baseSha);
   });
 });

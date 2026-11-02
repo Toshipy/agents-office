@@ -12,7 +12,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import type { StepExecutionContext } from '../agents/runner';
 import { RunnerError } from '../agents/runner';
-import { headSha, run, safeEnv } from '../agents/claude/git';
+import { headSha, run, safeEnv, wtArgs, type Worktree } from '../agents/claude/git';
 import { Mutex } from '../lib/mutex';
 import { GithubApiError, type GithubApp } from './app';
 
@@ -29,7 +29,7 @@ export interface RemoteRepoHost {
   prepare(ctx: StepExecutionContext, localPath: string, remote: RemoteRepo): Promise<{ baseRef: string }>;
   publish(
     ctx: StepExecutionContext,
-    worktree: string,
+    wt: Worktree,
     remote: RemoteRepo,
     args: { branch: string; existing: { number: number; url: string } | null; title: string; body: string },
   ): Promise<{ number: number; url: string; headSha: string }>;
@@ -119,7 +119,7 @@ export class GithubRepoHost implements RemoteRepoHost {
 
   async publish(
     ctx: StepExecutionContext,
-    worktree: string,
+    wt: Worktree,
     remote: RemoteRepo,
     args: { branch: string; existing: { number: number; url: string } | null; title: string; body: string },
   ) {
@@ -127,14 +127,16 @@ export class GithubRepoHost implements RemoteRepoHost {
     const env = await this.gitEnv(remote.installationId);
     // 強制 push はしない（人が同じブランチに追加したコミットを消さない）
     // フックは実行しない（リポジトリ由来の設定でトークンを持つプロセスにコードを実行させない）
-    const r = await run('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', 'push', '--quiet', '--no-verify', 'origin', `HEAD:refs/heads/${args.branch}`], {
-      cwd: worktree,
+    // 作業ツリーの .git は信用せず記録した gitDir を使い、push 先も origin ではなく取得済みのクローン URL を明示する
+    const push = wtArgs(wt, ['push', '--quiet', '--no-verify', remote.cloneUrl, `HEAD:refs/heads/${args.branch}`]);
+    const r = await run('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', ...push.args], {
+      cwd: push.cwd,
       env,
       timeoutMs: 10 * 60_000,
       signal: ctx.signal,
     });
     if (r.code !== 0) throw new RunnerError(`ブランチ ${args.branch} を push できません: ${r.stderr.trim().slice(-300)}`, 'GIT_PUSH_FAILED', false);
-    const sha = await headSha(worktree);
+    const sha = await headSha(wt);
     await ctx.log(`GitHub に push: ${args.branch}（${sha.slice(0, 7)}）`);
     if (args.existing) return { number: args.existing.number, url: args.existing.url, headSha: sha };
     try {

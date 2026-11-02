@@ -5,7 +5,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { RunnerError } from '../runner';
 
 const SECRET_ENV = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|SESSION|COOKIE|AUTH)/i;
@@ -80,7 +80,7 @@ export interface Worktree {
 }
 
 /** worktree 向けの git の共通引数。作業ツリーの `.git` ファイルを信用せず、記録した gitDir を使う */
-function wtArgs(wt: Worktree | string, args: string[]): { cwd: string; args: string[] } {
+export function wtArgs(wt: Worktree | string, args: string[]): { cwd: string; args: string[] } {
   if (typeof wt === 'string') return { cwd: wt, args };
   return { cwd: wt.path, args: [`--git-dir=${wt.gitDir}`, `--work-tree=${wt.path}`, ...args] };
 }
@@ -112,9 +112,16 @@ export async function ensureWorktree(
   const linkFile = `${path}.gitlink`;
   const oldBase = existsSync(baseFile) ? (await readFile(baseFile, 'utf8')).trim() : '';
   if (existsSync(path) && oldBase && existsSync(linkFile)) {
-    // 健全な worktree は再利用する（git が作業ツリーとして認識できることも確かめる）
-    const r = await run('git', ['-C', path, 'rev-parse', '--absolute-git-dir'], { cwd: path, timeoutMs: 10_000 });
-    if (r.code === 0 && r.stdout.trim()) return { path, branch, baseSha: oldBase, gitDir: r.stdout.trim() };
+    // 記録した .git の中身と違えば、AI（やテスト内のコード）が書き換えたとみなして止める（作り直さない）
+    const recorded = await readFile(linkFile, 'utf8');
+    const live = await readFile(join(path, '.git'), 'utf8').catch(() => null);
+    if (live !== recorded) throw gitLinkTampered();
+    // gitDir は生きた .git ではなく、記録した中身から決める
+    const gitDir = await trustedGitDir(repoPath, path, recorded);
+    if (gitDir) {
+      const r = await run('git', [`--git-dir=${gitDir}`, `--work-tree=${path}`, 'rev-parse', '--verify', 'HEAD'], { cwd: path, timeoutMs: 10_000 });
+      if (r.code === 0) return { path, branch, baseSha: oldBase, gitDir };
+    }
   }
   // 作りかけ（.base / .gitlink が無い、git が壊れている）は片付けて作り直す
   if (existsSync(path) || existsSync(baseFile) || existsSync(linkFile)) {
@@ -130,10 +137,32 @@ export async function ensureWorktree(
   const exists = await run('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoPath });
   if (exists.code === 0) await git(repoPath, ['worktree', 'add', path, branch], signal);
   else await git(repoPath, ['worktree', 'add', '-b', branch, path, baseSha], signal);
-  const gitDir = (await git(path, ['rev-parse', '--absolute-git-dir'], signal)).trim();
-  await writeFile(linkFile, await readFile(join(path, '.git'), 'utf8'), 'utf8');
+  const linkText = await readFile(join(path, '.git'), 'utf8');
+  const gitDir = await trustedGitDir(repoPath, path, linkText);
+  if (!gitDir) throw new RunnerError('worktree の gitDir を確認できません', 'GIT_LINK_TAMPERED', false);
+  await writeFile(linkFile, linkText, 'utf8');
   await writeFile(baseFile, baseSha, 'utf8');
   return { path, branch, baseSha, gitDir };
+}
+
+function gitLinkTampered() {
+  return new RunnerError('作業ツリーの .git が書き換えられたため中止しました', 'GIT_LINK_TAMPERED', false);
+}
+
+/**
+ * 記録した `.git` の中身（`gitdir: <path>`）から gitDir を決める。
+ * 元リポジトリの `<共通 git dir>/worktrees/` の直下を指していなければ null（信用しない）。
+ */
+async function trustedGitDir(repoPath: string, worktreePath: string, linkText: string): Promise<string | null> {
+  const m = /^gitdir: (.+)\n?$/.exec(linkText);
+  if (!m) return null;
+  const dir = resolve(worktreePath, m[1].trim());
+  if (!existsSync(dir)) return null;
+  const common = await run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: repoPath, timeoutMs: 10_000 });
+  if (common.code !== 0) return null;
+  const root = realpathSync(join(common.stdout.trim(), 'worktrees'));
+  const real = realpathSync(dir);
+  return dirname(real) === root ? real : null;
 }
 
 /**
@@ -144,7 +173,7 @@ export async function assertGitLink(wt: Worktree): Promise<void> {
   const expected = existsSync(`${wt.path}.gitlink`) ? await readFile(`${wt.path}.gitlink`, 'utf8') : null;
   const actual = await readFile(join(wt.path, '.git'), 'utf8').catch(() => null);
   if (expected === null || actual !== expected) {
-    throw new RunnerError('作業ツリーの .git が書き換えられたため中止しました', 'GIT_LINK_TAMPERED', false);
+    throw gitLinkTampered();
   }
 }
 
