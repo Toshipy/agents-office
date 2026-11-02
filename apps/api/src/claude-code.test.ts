@@ -155,7 +155,8 @@ afterAll(async () => {
 
 beforeEach(() => setScenario({}));
 
-describe('Claude Code (subscription) runtime — fake CLI', () => {
+// publish 承認の往復が増えたため、並列実行で遅くなっても切れない上限にする
+describe('Claude Code (subscription) runtime — fake CLI', { timeout: 30_000 }, () => {
   it('runs plan → implement → test → review → draft PR through `claude -p` with locked-down options', async () => {
     setScenario({ plan: [{ output: PLAN }], develop: [GOOD_DEV], review: [{ output: REVIEW }] });
     const runId = await startRun();

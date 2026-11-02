@@ -1077,7 +1077,10 @@ export class WorkflowEngine {
     });
   }
 
-  /** 承認した head と worktree の HEAD が違った PR の工程を終え、今の HEAD で publish 承認を作り直す。Run は失敗にしない */
+  /**
+   * 承認した head と worktree の HEAD が違った PR の工程を終え、今の HEAD でテスト → AI レビューからやり直す。
+   * レビューが通れば既存の流れで publish 承認を作り直すので、人はテストと AI レビューを通った head だけを承認する。Run は失敗にしない
+   */
   private async reRequestPublish(step: StepRow, run: RunRow, err: PublishStaleError) {
     const now = new Date();
     await this.db.insert(stepLogs).values({
@@ -1085,7 +1088,7 @@ export class WorkflowEngine {
       runId: run.id,
       stepId: step.id,
       kind: 'error',
-      message: `${err.code}: ${err.message} — push せず、publish 承認を作り直します`,
+      message: `${err.code}: ${err.message} — push せず、テストと AI レビューからやり直します`,
     });
     await this.db
       .update(runSteps)
@@ -1098,8 +1101,8 @@ export class WorkflowEngine {
       { runId: run.id, projectId: run.projectId },
     );
     const [cur] = await this.db.select().from(runs).where(eq(runs.id, run.id));
-    if (!cur || TERMINAL_RUN_STATUSES.includes(cur.status)) return;
-    await this.requestPublish(cur, err.preview);
+    if (!cur || cur.status !== 'validating') return;
+    await this.addStep(cur, 'test', 'tester', cur.revisionCount);
   }
 
   /**

@@ -586,7 +586,7 @@ describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_0
     expect(git(origin, 'merge-base', '--is-ancestor', recoveredSha, `refs/heads/${branch}`)).toBe('');
   });
 
-  it('承認と工程の間に worktree の HEAD が動いたら push せず、publish 承認を作り直す', async () => {
+  it('承認と工程の間に worktree の HEAD が動いたら push せず、テストと AI レビューを通してから publish 承認を作り直す', async () => {
     fake.setScenario({ plan: [{ output: PLAN }], develop: [{ writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Howdy';\n" }] }], review: [{ output: REVIEW }] });
     await webhook('issues', issuePayload('toshipy', 11));
     const created = await waitFor(async () => (await s.db.select().from(runs)).find((r) => r.issueKey === `${REPO_ID}#11`));
@@ -601,19 +601,27 @@ describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_0
     const moved = git(wt, 'rev-parse', 'HEAD');
     expect(first.payload.headSha).not.toBe(moved);
     const postsBefore = pullPosts();
+    const stepsBefore = await s.db.select().from(runSteps).where(eq(runSteps.runId, created.id));
+    const reviewsBefore = fake.counts().review ?? 0;
 
     await decidePublish(s.db, req, created.id);
     const second = await waitFor(async () => {
       const ap = await pendingPublish(s.db, created.id);
       return ap && ap.id !== first.id ? ap : null;
     });
-    // push も PR 作成もせず、動いた後の HEAD で承認を作り直す（Run は失敗にしない）
+    // push も PR 作成もせず、動いた後の HEAD でテスト → AI レビューを通してから承認を作り直す（Run は失敗にしない）
     expect(second.payload.headSha).toBe(moved);
     expect((await runRow(created.id)).status).toBe('needs_input');
     expect(remoteHasBranch(branch)).toBe(false);
     expect(pullPosts()).toBe(postsBefore);
-    const stale = (await s.db.select().from(runSteps).where(eq(runSteps.runId, created.id))).filter((x) => x.key === 'draft_pr');
+    const stepsAfter = await s.db.select().from(runSteps).where(eq(runSteps.runId, created.id));
+    const stale = stepsAfter.filter((x) => x.key === 'draft_pr');
     expect(stale.map((x) => x.errorCode)).toEqual(['PUBLISH_STALE']);
+    const rerun = stepsAfter.filter((x) => !stepsBefore.some((b) => b.id === x.id) && x.seq > stale[0].seq).sort((a, b) => a.seq - b.seq);
+    expect(rerun.map((x) => `${x.key}:${x.status}`)).toEqual(['test:succeeded', 'review:succeeded']);
+    expect(fake.counts().review).toBe(reviewsBefore + 1);
+    // 作り直した AI レビューは動いた HEAD を見ている
+    expect(fake.calls().filter((c) => c.purpose === 'review').at(-1)!.stdin).toContain('late.txt');
 
     // 作り直した承認を承認すると、その HEAD を push して PR を作る
     await decidePublish(s.db, req, created.id);

@@ -432,8 +432,8 @@ export class ClaudeRunner implements AgentRunner {
     const approved = ctx.previous.publish as { headSha?: unknown; title?: unknown; body?: unknown } | undefined;
     const head = await headSha(wt);
     if (!approved || approved.headSha !== head) {
-      await ctx.log(`承認した head（${String(approved?.headSha ?? 'なし').slice(0, 12)}）と worktree の HEAD（${head.slice(0, 12)}）が違うため、push せず承認を取り直します`, 'error');
-      throw new PublishStaleError('承認した内容から worktree の HEAD が変わっています', await this.publishPreview(ctx, wt, String(ctx.previous.reviewSummary ?? '')));
+      await ctx.log(`承認した head（${String(approved?.headSha ?? 'なし').slice(0, 12)}）と worktree の HEAD（${head.slice(0, 12)}）が違うため、push せずテストと AI レビューからやり直します`, 'error');
+      throw new PublishStaleError('承認した内容から worktree の HEAD が変わっています');
     }
     const update = ctx.key === 'update_pr' && ctx.pr !== null;
     const remote = ctx.remote;

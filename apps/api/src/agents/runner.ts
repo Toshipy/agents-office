@@ -109,13 +109,10 @@ export interface PublishPreview {
 
 /**
  * PR の工程で、worktree の HEAD が人の承認した headSha と違った。承認していない内容は push しない。
- * エンジンは Run を失敗にせず、preview（今の HEAD）で publish 承認を作り直す。
+ * エンジンは Run を失敗にせず、今の HEAD でテスト → AI レビューからやり直し、通れば publish 承認を作り直す。
  */
 export class PublishStaleError extends RunnerError {
-  constructor(
-    message: string,
-    readonly preview: PublishPreview,
-  ) {
+  constructor(message: string) {
     super(message, 'PUBLISH_STALE', false);
   }
 }

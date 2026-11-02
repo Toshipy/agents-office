@@ -124,8 +124,6 @@ describe('worktree', () => {
     } as unknown as StepExecutionContext;
     const err = await runner.execute(ctx).catch((e) => e);
     expect(err).toMatchObject({ code: 'PUBLISH_STALE', retryable: false });
-    // 作り直す承認のために、今の HEAD を返す
-    expect(err.preview.headSha).toBe(await headSha(await ensureWorktree(repo, wtDir, 'run_p', 'ai/run-p')));
     expect(tools).toEqual([]);
   });
 });
