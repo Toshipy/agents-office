@@ -1,7 +1,7 @@
 /**
  * GitHub 上のリポジトリを、サーバー上の管理クローン（.data/repos/<repositoryId>）経由で扱う。
  *  - prepare: クローン（初回）/ fetch して、Run の作業ブランチの起点（origin/<既定ブランチ>）を返す
- *  - publish: ai/ ブランチを push し、Draft PR を作成（更新時は push のみ。PR は GitHub 側で自動更新される）
+ *  - publish: ai/ ブランチを push し、PR を作成（更新時は push のみ。PR は GitHub 側で自動更新される）
  *
  * Installation token は GIT_ASKPASS 経由で git に渡す（コマンド引数・remote URL・git の設定に残さない）。
  * credential.helper は空にして、OS の資格情報ストアにも保存させない。
@@ -140,16 +140,22 @@ export class GithubRepoHost implements RemoteRepoHost {
     await ctx.log(`GitHub に push: ${args.branch}（${sha.slice(0, 7)}）`);
     if (args.existing) return { number: args.existing.number, url: args.existing.url, headSha: sha };
     try {
+      // 再試行で PR 作成が 2 回目になっても 422 にならないよう、先に同じブランチの open な PR を探す
+      const found = await this.app.findOpenPullByHead(remote.installationId, remote.fullName, args.branch);
+      if (found) {
+        await ctx.log(`既存の PR #${found.number} を使用: ${found.htmlUrl}`);
+        return { number: found.number, url: found.htmlUrl, headSha: sha };
+      }
       const pr = await this.app.createPullRequest(remote.installationId, remote.fullName, {
         title: args.title.slice(0, 250),
         head: args.branch,
         base: remote.defaultBranch,
         body: args.body.slice(0, 60_000),
       });
-      await ctx.log(`Draft PR #${pr.number} を作成: ${pr.htmlUrl}`);
+      await ctx.log(`PR #${pr.number} を作成: ${pr.htmlUrl}`);
       return { number: pr.number, url: pr.htmlUrl, headSha: sha };
     } catch (err) {
-      throw githubRunnerError(err, 'Draft PR を作成できません');
+      throw githubRunnerError(err, 'PR を作成できません');
     }
   }
 }

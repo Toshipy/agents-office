@@ -9,7 +9,7 @@
  *  - Planner / Reviewer: 構造化出力で計画とレビュー結果を JSON で受け取る
  *  - Developer: Run ごとの隔離 worktree でファイルを変更。終了後に変更パスを検査し、禁止パスへの変更があれば破棄
  *  - Tester: 利用者が Project に設定したコマンドだけを worktree で実行（シェルは使わない）
- *  - Draft PR: ローカル版は worktree のブランチを PR とみなす（GitHub への push は未接続）
+ *  - PR: ローカル版は worktree のブランチを PR とみなす（GitHub への push は未接続）
  *
  * 依頼本文・Issue・リポジトリ内容は非信頼入力として扱い、ツールポリシーは変更しない（基本設計書 9.3）。
  */
@@ -29,7 +29,7 @@ export interface ClaudeRunnerOptions {
   worktreesDir: string;
   testTimeoutMs: number;
   backend: ModelBackend;
-  /** GitHub App 連携（管理クローンの取得・push・Draft PR）。未設定ならローカルリポジトリのみ */
+  /** GitHub App 連携（管理クローンの取得・push・PR）。未設定ならローカルリポジトリのみ */
   remoteHost?: RemoteRepoHost | null;
 }
 
@@ -334,14 +334,14 @@ export class ClaudeRunner implements AgentRunner {
       '',
       '## 判定',
       '',
-      approved ? 'Draft PR として提出可能です。マージ可否は人間がレビューで判断します。' : '修正が必要です。Developer に差し戻します。',
+      approved ? 'PR として提出可能です。マージ可否は人間がレビューで判断します。' : '修正が必要です。Developer に差し戻します。',
       '',
     ].join('\n');
     await ctx.tool('review.write', {}, approved ? `指摘: blocker 0 / nit ${review.nits.length}` : `blocker ${blockers.length} 件`);
     await ctx.artifact('review', 'AI レビュー', 'review.md', 'text/markdown', md);
     return {
       status: 'succeeded',
-      summary: approved ? 'Draft PR 提出可（人間の承認ではない）' : `blocker ${blockers.length} 件（差し戻し）`,
+      summary: approved ? 'PR 提出可（人間の承認ではない）' : `blocker ${blockers.length} 件（差し戻し）`,
       outcome: { approved, blockers, nits: review.nits, reviewSummary: review.summary },
     };
   }
@@ -353,19 +353,21 @@ export class ClaudeRunner implements AgentRunner {
     const remote = ctx.remote;
     const push = await ctx.tool('github.branch.push', { repo: ctx.repo, branch: ctx.branch }, `ブランチを確定: ${ctx.branch}${remote ? '（GitHub に push）' : '（ローカル）'}`);
     if (!push.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${push.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
+    // toolBroker の方針が draft: true を要求するため、承認用の引数はそのまま（実際の GitHub PR は通常の PR で作る）
     const tool = update ? 'github.pull_request.update' : 'github.pull_request.create_draft';
     const res = await ctx.tool(
       tool,
       { repo: ctx.repo, branch: ctx.branch, base: remote?.defaultBranch ?? 'main', draft: true },
-      update ? `Draft PR #${ctx.pr!.number} を更新` : `Draft PR を作成${remote ? '（GitHub）' : '（ローカル）'}`,
+      update ? `PR #${ctx.pr!.number} を更新` : `PR を作成${remote ? '（GitHub）' : '（ローカル）'}`,
     );
     if (!res.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${res.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
     const diff = await diffFromBase(wt, wt.baseSha);
     const testsSkipped = Boolean(ctx.previous.testsSkipped);
     const testsLine = testsSkipped ? '未実行（コマンド未設定）' : ctx.previous.testsPassed === false ? '✗ 失敗' : '✓ 通過';
-    let pr: { number: number; url: string; branch: string; headSha: string; draft: true };
+    let pr: { number: number; url: string; branch: string; headSha: string; draft: false };
     if (remote) {
       const body = [
+        ...(ctx.issueNumber ? [`Closes #${ctx.issueNumber}`, ''] : []),
         '## 内容',
         '',
         String(ctx.previous.developerSummary ?? ctx.title),
@@ -376,11 +378,10 @@ export class ClaudeRunner implements AgentRunner {
         '',
         `- テスト: ${testsLine}`,
         `- 変更: ${diff.files.length} ファイル`,
-        ...(ctx.issueNumber ? [`- 関連 Issue: #${ctx.issueNumber}`] : []),
         '',
         '---',
-        `Personal AI Workspace の Run \`${ctx.runId}\` が作成した Draft PR です。マージするかどうかは人が判断してください（AI はマージしません）。`,
-        '',
+        `Run \`${ctx.runId}\``,
+        'この PR は agents-office が作りました。マージは人が行います。',
       ].join('\n');
       const published = await this.opts.remoteHost!.publish(ctx, wt, remote, {
         branch: ctx.branch,
@@ -388,13 +389,13 @@ export class ClaudeRunner implements AgentRunner {
         title: ctx.title,
         body,
       });
-      pr = { number: published.number, url: published.url, branch: ctx.branch, headSha: published.headSha, draft: true };
+      pr = { number: published.number, url: published.url, branch: ctx.branch, headSha: published.headSha, draft: false };
     } else {
       const number = update ? ctx.pr!.number : await ctx.allocatePrNumber();
-      pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: await headSha(wt), draft: true };
+      pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: await headSha(wt), draft: false };
     }
     const md = [
-      `# ${update ? 'Draft PR 更新' : 'Draft PR 作成'} — #${pr.number}`,
+      `# ${update ? 'PR 更新' : 'PR 作成'} — #${pr.number}`,
       '',
       remote ? `- GitHub: ${pr.url}` : `- リポジトリ: \`${ctx.localRepo!.path}\``,
       `- ブランチ: \`${ctx.branch}\`（base: \`${remote ? `${remote.defaultBranch} @ ` : ''}${wt.baseSha.slice(0, 7)}\`）`,
@@ -416,7 +417,7 @@ export class ClaudeRunner implements AgentRunner {
         : `ローカル版では GitHub に push しません。ブランチ \`${ctx.branch}\` を確認し、問題なければ人がマージしてください（AI はマージしません）。`,
       '',
     ].join('\n');
-    await ctx.artifact('draft_pr', `Draft PR #${pr.number}${update ? '（更新）' : ''}`, 'draft-pr.md', 'text/markdown', md);
-    return { status: 'succeeded', summary: `Draft PR #${pr.number} ${update ? '更新' : '作成'}（ブランチ ${ctx.branch}）`, outcome: { pr } };
+    await ctx.artifact('draft_pr', `PR #${pr.number}${update ? '（更新）' : ''}`, 'draft-pr.md', 'text/markdown', md);
+    return { status: 'succeeded', summary: `PR #${pr.number} ${update ? '更新' : '作成'}（ブランチ ${ctx.branch}）`, outcome: { pr } };
   }
 }

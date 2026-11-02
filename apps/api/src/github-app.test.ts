@@ -47,6 +47,8 @@ const fake = installFakeClaude(join(tmp, 'stub'));
 const requests: { method: string; path: string; auth: string; body: any }[] = [];
 const issuedTokens = new Set<string>();
 const pulls: any[] = [];
+/** 'flaky' のとき、1 回目の PR 作成は PR を作ってから 502 を返し、以降は 422（既存 PR あり）を返す */
+const prMock = { mode: 'normal' as 'normal' | 'flaky', posts: 0 };
 
 
 /* 操作系（Issue・ラベル・アサイン・PR・レビュー）のモック。状態は ops.* に持つ */
@@ -189,8 +191,16 @@ function startMockGithub(): Promise<void> {
       } catch {
         return send(422, { message: 'Validation Failed', errors: [{ message: `head ${body.head} not found` }] });
       }
+      prMock.posts += 1;
+      if (prMock.mode === 'flaky' && prMock.posts > 1) {
+        return send(422, { message: 'Validation Failed', errors: [{ message: 'A pull request already exists for toshipy:' + body.head }] });
+      }
       const number = 12 + pulls.length;
       pulls.push({ ...body, number });
+      if (prMock.mode === 'flaky') {
+        ops.openPulls.push({ number, html_url: `https://github.com/${FULL_NAME}/pull/${number}`, head: { label: `toshipy:${body.head}`, sha }, draft: false });
+        return send(502, { message: 'Bad Gateway' });
+      }
       return send(201, { number, html_url: `https://github.com/${FULL_NAME}/pull/${number}`, draft: body.draft === true, head: { sha } });
     }
     send(404, { message: 'Not Found' });
@@ -399,7 +409,8 @@ describe('GitHub App integration (mock GitHub API + bare repo)', () => {
     expect(git(origin, 'show', 'main:src/greet.ts')).toContain("'Hello'"); // main は変更しない
     expect(pulls).toHaveLength(1);
     expect(pulls[0]).toMatchObject({ head: branch, base: 'main', draft: false, title: '#5 greet の文言を変更' });
-    expect(pulls[0].body).toContain('関連 Issue: #5');
+    expect(pulls[0].body.split('\n')[0]).toBe('Closes #5');
+    expect(pulls[0].body).toContain('この PR は agents-office が作りました。マージは人が行います。');
     expect(run.pr!.url).toBe(`https://github.com/${FULL_NAME}/pull/12`);
 
     // トークンを残さない: 管理クローンの remote URL・git 設定に資格情報が無い。Claude Code には GitHub のトークンを渡さない
@@ -435,6 +446,26 @@ describe('GitHub App integration (mock GitHub API + bare repo)', () => {
     expect(merged.outcome).toBe('run_completed_merged');
     expect((await runRow(run.id)).status).toBe('completed');
     expect(requests.some((r) => r.path.includes('/merge'))).toBe(false);
+  });
+
+  it('PR 作成の再試行で既存の PR を使い、422 で失敗しない', async () => {
+    fake.setScenario({ plan: [{ output: PLAN }], develop: [{ writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Hey';\n" }] }], review: [{ output: REVIEW }] });
+    const before = pulls.length;
+    prMock.mode = 'flaky';
+    prMock.posts = 0;
+    try {
+      await webhook('issues', issuePayload('toshipy', 8));
+      const run = await waitStatus((await waitFor(async () => (await s.db.select().from(runs)).find((r) => r.issueKey === `${REPO_ID}#8`))).id, 'waiting_review', 'failed');
+      expect(run.status).toBe('waiting_review');
+      expect(pulls.length - before).toBe(1);
+      const made = pulls[pulls.length - 1];
+      expect(made.draft).toBe(false);
+      expect(made.body.split('\n')[0]).toBe('Closes #8');
+      expect(run.pr!.number).toBe(made.number);
+      expect(run.pr!.draft).toBe(false);
+    } finally {
+      prMock.mode = 'normal';
+    }
   });
 
   it('cancels the run when the PR is closed without merging, and rejects forged webhooks', async () => {
