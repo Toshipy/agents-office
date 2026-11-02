@@ -80,12 +80,12 @@ export interface Worktree {
 }
 
 /** worktree 向けの git の共通引数。作業ツリーの `.git` ファイルを信用せず、記録した gitDir を使う */
-export function wtArgs(wt: Worktree | string, args: string[]): { cwd: string; args: string[] } {
+export function wtArgs(wt: Pick<Worktree, 'path' | 'gitDir'> | string, args: string[]): { cwd: string; args: string[] } {
   if (typeof wt === 'string') return { cwd: wt, args };
   return { cwd: wt.path, args: [`--git-dir=${wt.gitDir}`, `--work-tree=${wt.path}`, ...args] };
 }
 
-async function wtGit(wt: Worktree | string, args: string[], signal?: AbortSignal) {
+async function wtGit(wt: Pick<Worktree, 'path' | 'gitDir'> | string, args: string[], signal?: AbortSignal) {
   const a = wtArgs(wt, args);
   return git(a.cwd, a.args, signal);
 }
@@ -194,13 +194,15 @@ export async function removeWorktree(repoPath: string, worktreePath: string, bra
   await rm(`${worktreePath}.gitlink`, { force: true });
 }
 
-export async function listFiles(worktree: string): Promise<string[]> {
-  const out = await git(worktree, ['ls-files', '--cached', '--others', '--exclude-standard']);
+/** 作業ツリーの .git は信用せず、記録した gitDir を明示して読む（gitDir を渡せない呼び出しは文字列のパス） */
+export async function listFiles(worktree: Pick<Worktree, 'path' | 'gitDir'> | string): Promise<string[]> {
+  const out = await wtGit(worktree, ['ls-files', '--cached', '--others', '--exclude-standard']);
   return out.split('\n').filter(Boolean);
 }
 
-export async function grep(worktree: string, query: string): Promise<string> {
-  const r = await run('git', ['grep', '-n', '-I', '--fixed-strings', '-e', query, '--', '.'], { cwd: worktree, timeoutMs: 30_000 });
+export async function grep(worktree: Pick<Worktree, 'path' | 'gitDir'> | string, query: string): Promise<string> {
+  const a = wtArgs(worktree, ['grep', '-n', '-I', '--fixed-strings', '-e', query, '--', '.']);
+  const r = await run('git', a.args, { cwd: a.cwd, timeoutMs: 30_000 });
   return r.stdout;
 }
 

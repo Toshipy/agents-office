@@ -179,7 +179,7 @@ export class ClaudeApiBackend implements ModelBackend {
     });
   }
 
-  private async runDevTool(ctx: StepExecutionContext, worktree: string, name: string, input: unknown): Promise<{ content: string; isError: boolean }> {
+  private async runDevTool(ctx: StepExecutionContext, worktree: string, gitDir: string | undefined, name: string, input: unknown): Promise<{ content: string; isError: boolean }> {
     const fail = (content: string) => ({ content, isError: true });
     switch (name) {
       case 'list_files': {
@@ -187,7 +187,7 @@ export class ClaudeApiBackend implements ModelBackend {
         if (!p.success) return fail('INVALID_INPUT');
         const decision = await ctx.tool('repo.read', { path: p.data.path_prefix }, `ファイル一覧: ${p.data.path_prefix || '/'}`);
         if (!decision.allowed) return fail(decision.reason);
-        const files = (await listFiles(worktree)).filter((f) => f.startsWith(p.data.path_prefix));
+        const files = (await listFiles(gitDir ? { path: worktree, gitDir } : worktree)).filter((f) => f.startsWith(p.data.path_prefix));
         return { content: files.slice(0, 500).join('\n') + (files.length > 500 ? `\n…（他 ${files.length - 500} 件）` : ''), isError: false };
       }
       case 'read_file': {
@@ -206,7 +206,7 @@ export class ClaudeApiBackend implements ModelBackend {
         if (!p.success) return fail('INVALID_INPUT');
         const decision = await ctx.tool('repo.read', { query: p.data.query }, `検索: ${p.data.query.slice(0, 60)}`);
         if (!decision.allowed) return fail(decision.reason);
-        const lines = (await grep(worktree, p.data.query)).split('\n').filter(Boolean);
+        const lines = (await grep(gitDir ? { path: worktree, gitDir } : worktree, p.data.query)).split('\n').filter(Boolean);
         return { content: lines.slice(0, 200).join('\n') || '（該当なし）', isError: false };
       }
       case 'write_file': {
@@ -287,7 +287,7 @@ export class ClaudeApiBackend implements ModelBackend {
       messages.push({ role: 'assistant', content: response.content });
       const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
       for (const tu of toolUses) {
-        const r = await this.runDevTool(ctx, req.worktree, tu.name, tu.input);
+        const r = await this.runDevTool(ctx, req.worktree, req.gitDir, tu.name, tu.input);
         if (r.isError) await ctx.log(`ツール ${tu.name} を拒否/失敗: ${r.content.slice(0, 160)}`, 'error');
         results.push({ type: 'tool_result', tool_use_id: tu.id, content: r.content, is_error: r.isError || undefined });
       }

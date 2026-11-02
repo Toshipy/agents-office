@@ -43,7 +43,7 @@ export interface AppConfig {
   testTimeoutMs: number;
   /** Tester の実行場所。docker = 使い捨てコンテナ（サーバーモードの既定）/ host = ホストで直接（ローカルの既定） */
   testSandbox: 'docker' | 'host';
-  /** Repo 別のイメージ指定が無いときに使うイメージ */
+  /** Repo 別のイメージ指定が無いときに使うイメージ。コンテナは非 root・HOME=/tmp のため、pnpm は testCommand に `corepack pnpm test` のように書く（`corepack enable` は使えない） */
   testImage: string;
   /** Tester のコンテナを繋ぐ docker ネットワーク */
   testNetwork: string;

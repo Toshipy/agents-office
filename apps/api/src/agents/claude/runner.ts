@@ -66,11 +66,11 @@ export class ClaudeRunner implements AgentRunner {
     const wt = await ensureWorktree(ctx.localRepo.path, this.opts.worktreesDir, ctx.runId, ctx.branch, ctx.signal, baseRef);
     switch (ctx.key) {
       case 'plan':
-        return this.plan(ctx, wt.path);
+        return this.plan(ctx, wt);
       case 'implement':
         return this.implement(ctx, wt);
       case 'test':
-        return this.test(ctx, wt.path);
+        return this.test(ctx, wt);
       case 'review':
         return this.review(ctx, wt);
       case 'draft_pr':
@@ -87,8 +87,9 @@ export class ClaudeRunner implements AgentRunner {
 
   /* ---------------------------------------------------------------- */
 
-  private async repoContext(worktree: string) {
-    const files = await listFiles(worktree);
+  private async repoContext(wt: Worktree) {
+    const worktree = wt.path;
+    const files = await listFiles(wt);
     const shown = files.slice(0, 400);
     let readme = '';
     for (const name of ['README.md', 'readme.md', 'README']) {
@@ -104,16 +105,18 @@ export class ClaudeRunner implements AgentRunner {
     ].join('\n');
   }
 
-  private async plan(ctx: StepExecutionContext, worktree: string): Promise<StepOutput> {
+  private async plan(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    const worktree = wt.path;
     await ctx.log(`${this.backend.label}で計画を作成 — 依頼本文は非信頼入力として扱う`);
     await ctx.tool('issue.read', {}, '依頼内容を取得');
     await ctx.tool('repo.read', { repo: ctx.repo }, 'リポジトリ構造を参照');
-    const context = await this.repoContext(worktree);
+    const context = await this.repoContext(wt);
     const { output: plan, model } = await this.backend.structured(ctx, {
       purpose: 'plan',
       schema: PlanOutput,
       system: PLANNER_SYSTEM,
       worktree,
+      gitDir: wt.gitDir,
       user: [
         `<untrusted_request>\nタイトル: ${ctx.title}\n\n${ctx.request}\n</untrusted_request>`,
         ctx.guidance ? `人からの追加指示（信頼できる指示）: ${ctx.guidance}` : '',
@@ -207,6 +210,7 @@ export class ClaudeRunner implements AgentRunner {
     const { summary } = await this.backend.develop(ctx, {
       system: DEVELOPER_SYSTEM,
       worktree,
+      gitDir: wt.gitDir,
       user: [
         `<untrusted_request>\nタイトル: ${ctx.title}\n\n${ctx.request}\n</untrusted_request>`,
         detail
@@ -253,7 +257,8 @@ export class ClaudeRunner implements AgentRunner {
     throw new RunnerError(`禁止されたパスへの変更を検出しました: ${violations.slice(0, 5).join(' / ')}`, 'FORBIDDEN_CHANGE', false);
   }
 
-  private async test(ctx: StepExecutionContext, worktree: string): Promise<StepOutput> {
+  private async test(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    const worktree = wt.path;
     const command = ctx.localRepo?.testCommand?.trim();
     if (!command) {
       await ctx.log('テストコマンドが未設定のため実行しません（Projects でテストコマンドを設定できます）', 'error');
@@ -280,6 +285,8 @@ export class ClaudeRunner implements AgentRunner {
         runId: ctx.runId,
         attempt: ctx.attempt,
       });
+      // コンテナ内のコードは /work/.git を書き換えられる。以降の git 操作の前に、記録した中身と一致するか確かめる
+      await assertGitLink(wt);
       const output = `${r.stdout}\n${r.stderr}`.trim();
       results.push({ command: c, exitCode: r.code, timedOut: r.timedOut, output: output.slice(-20_000) });
       await ctx.log(`${r.code === 0 ? '✓' : '✗'} ${c}（exit ${r.code}${r.timedOut ? '・タイムアウト' : ''}）`, r.code === 0 ? 'log' : 'error');
@@ -316,6 +323,7 @@ export class ClaudeRunner implements AgentRunner {
       schema: ReviewOutput,
       system: REVIEWER_SYSTEM,
       worktree,
+      gitDir: wt.gitDir,
       user: [
         `<untrusted_request>\nタイトル: ${ctx.title}\n\n${ctx.request}\n</untrusted_request>`,
         detail ? `受入条件:\n${bullet(detail.acceptance_criteria)}` : '',

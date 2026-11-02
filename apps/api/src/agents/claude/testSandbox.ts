@@ -6,6 +6,8 @@
  *    マウントも環境変数渡しもしない。テストコードが push 先を書き換えたり秘密を読んだりできないようにするため。
  *  - HostSandbox: ホストでそのまま実行する（ローカル利用の既定。秘密は safeEnv で除く）。
  */
+import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { RunnerError } from '../runner';
 import { run, safeEnv } from './git';
 
@@ -15,8 +17,6 @@ export interface SandboxResult {
   stderr: string;
   timedOut: boolean;
 }
-
-export type DockerResult = SandboxResult;
 
 export interface TestSandboxExecOptions {
   /** Run の worktree の絶対パス（コンテナには、ここだけをマウントする） */
@@ -44,71 +44,120 @@ export interface DockerSandboxOptions {
   /** コンテナを繋ぐ docker ネットワーク（PAW_TEST_NETWORK） */
   network: string;
   defaultImage: string;
-  /** docker の実行。テストで差し替える。未指定なら実際の docker CLI */
-  spawnDocker?: (args: string[], opts: { timeoutMs: number; signal?: AbortSignal }) => Promise<SandboxResult>;
+  /**
+   * docker の実行。テストで差し替える。未指定なら実際の docker CLI。
+   * docker コマンド自体を起動できないとき（ENOENT など）は errno 付きの Error を reject する。
+   */
+  spawnDocker?: (args: string[], opts: { timeoutMs: number }) => Promise<SandboxResult>;
+  /** コンテナの資源上限（既定: pids 512・メモリ 4g・CPU 2） */
+  limits?: { pids?: number; memory?: string; cpus?: string };
 }
 
-const defaultSpawnDocker: NonNullable<DockerSandboxOptions['spawnDocker']> = (args, opts) =>
-  run('docker', args, { cwd: process.cwd(), timeoutMs: opts.timeoutMs, signal: opts.signal, env: safeEnv() });
+/** docker CLI に通す環境変数（接続先の指定。秘密は含まない） */
+const DOCKER_CLI_ENV = ['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'XDG_RUNTIME_DIR'];
 
-/** コンテナに渡す環境変数（CI と、ロケール・端末だけ。PATH や HOME などホストの値は渡さない） */
+const defaultSpawnDocker: NonNullable<DockerSandboxOptions['spawnDocker']> = (args, opts) =>
+  new Promise((resolvePromise, reject) => {
+    const env = safeEnv();
+    for (const k of DOCKER_CLI_ENV) if (process.env[k] !== undefined) env[k] = process.env[k];
+    execFile('docker', args, { timeout: opts.timeoutMs, maxBuffer: 20 * 1024 * 1024, env, windowsHide: true }, (err, stdout, stderr) => {
+      const e = err as (NodeJS.ErrnoException & { killed?: boolean }) | null;
+      // コマンドを起動できなかった（errno が文字列 = ENOENT / EACCES など）は結果ではなく例外で返す
+      if (e && typeof e.code === 'string') return reject(e);
+      resolvePromise({ code: e ? (typeof e.code === 'number' ? e.code : 1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), timedOut: Boolean(e?.killed) });
+    });
+  });
+
+/** イメージ参照の形（先頭が - だと docker のオプションとして解釈されるため、英数字始まりに限る） */
+const IMAGE_REF = /^[A-Za-z0-9][A-Za-z0-9._\/:@-]{0,254}$/;
+
+export function assertImageRef(image: string): void {
+  if (!IMAGE_REF.test(image)) throw new RunnerError(`テスト用のイメージ名が正しくありません: ${image.slice(0, 80)}`, 'TEST_IMAGE_INVALID', false);
+}
+
+/** コンテナに渡す環境変数（CI・HOME・ロケール・端末だけ。PATH などホストの値は渡さない） */
 function containerEnv(): string[] {
   const env = safeEnv({ CI: '1' });
-  const out: string[] = [];
-  for (const k of ['CI', 'LANG', 'LC_ALL', 'TERM']) {
+  const out = ['--env', 'CI=1', '--env', 'HOME=/tmp'];
+  for (const k of ['LANG', 'LC_ALL', 'TERM']) {
     const v = env[k];
     if (v !== undefined) out.push('--env', `${k}=${v}`);
   }
   return out;
 }
 
+const unavailable = (msg: string) => new RunnerError(msg, 'TEST_SANDBOX_UNAVAILABLE', false);
+
 export class DockerSandbox implements TestSandbox {
   private readonly spawnDocker: NonNullable<DockerSandboxOptions['spawnDocker']>;
 
   constructor(private readonly opts: DockerSandboxOptions) {
+    // 既定イメージ（PAW_TEST_IMAGE）の不正は起動時に気づけるようにする
+    assertImageRef(opts.defaultImage);
     this.spawnDocker = opts.spawnDocker ?? defaultSpawnDocker;
   }
 
   async exec(cmd: string, args: string[], o: TestSandboxExecOptions): Promise<SandboxResult> {
-    const name = `paw-test-${o.runId}-${o.attempt}`;
+    // 中止済みなら、コンテナを作らない
+    if (o.signal.aborted) return { code: 130, stdout: '', stderr: '中止されました', timedOut: false };
     const image = o.image ?? this.opts.defaultImage;
+    assertImageRef(image);
+    // --mount の値はカンマ区切りなので、これらを含むパスはオプションの差し込みになり得る
+    if (/[,"\n\r]/.test(o.worktree)) throw unavailable('worktree のパスに使えない文字が含まれているため、コンテナを起動しません');
+    // 前回の残りと名前が衝突しないよう、ランダムな接尾辞を付ける
+    const name = `paw-test-${o.runId.replace(/[^A-Za-z0-9_.-]/g, '_')}-${o.attempt}-${randomBytes(4).toString('hex')}`;
     // API プロセスと同じ uid:gid で動かし、worktree に書いたファイルの所有者を API ユーザーのままにする
     const user = typeof process.getuid === 'function' && typeof process.getgid === 'function' ? ['--user', `${process.getuid()}:${process.getgid()}`] : [];
+    const lim = this.opts.limits ?? {};
     const dockerArgs = [
       'run',
       '--rm',
+      '--init', // PID 1 が SIGTERM を無視する node でも、止められるようにする
       '--name', name,
       '--network', this.opts.network,
-      '-v', `${o.worktree}:/work`,
+      '--mount', `type=bind,source=${o.worktree},target=/work`,
+      '--tmpfs', '/tmp:rw,exec,nosuid,size=1g',
       '-w', '/work',
       ...user,
+      '--cap-drop=ALL',
+      '--security-opt=no-new-privileges',
+      `--pids-limit=${lim.pids ?? 512}`,
+      `--memory=${lim.memory ?? '4g'}`,
+      `--cpus=${lim.cpus ?? '2'}`,
       ...containerEnv(),
       image,
       cmd,
       ...args,
     ];
 
-    const kill = () => this.spawnDocker(['kill', name], { timeoutMs: 10_000 }).catch(() => undefined);
-    const onAbort = () => void kill();
-    // docker CLI を殺してもコンテナは残るため、中止はコンテナ名で止める
-    if (o.signal.aborted) onAbort();
+    // docker CLI を殺してもコンテナは残るため、コンテナ名で強制削除する（SIGKILL）
+    const remove = async () => {
+      for (let i = 0; i < 2; i++) {
+        const r = await this.spawnDocker(['rm', '-f', name], { timeoutMs: 15_000 }).catch(() => null);
+        if (r && (r.code === 0 || /No such container/i.test(r.stderr))) return;
+        await new Promise((res) => setTimeout(res, 300));
+      }
+    };
+    const onAbort = () => void remove();
     o.signal.addEventListener('abort', onAbort, { once: true });
-    let r: SandboxResult;
+    let normal = false;
     try {
-      // signal は run に渡さない（CLI だけ先に死ぬと、コンテナの終了を待てない）。止めるのは docker kill
-      r = await this.spawnDocker(dockerArgs, { timeoutMs: o.timeoutMs });
-    } catch (err) {
-      throw new RunnerError(`Docker を実行できません（テストを安全に動かせないため中止します）: ${(err as Error).message}`, 'TEST_SANDBOX_UNAVAILABLE', false);
+      let r: SandboxResult;
+      try {
+        r = await this.spawnDocker(dockerArgs, { timeoutMs: o.timeoutMs });
+      } catch (err) {
+        throw unavailable(`Docker を実行できません（テストを安全に動かせないため中止します）: ${(err as Error).message}`);
+      }
+      // 125 = docker 自体の失敗。テスト側が exit 125 を返した場合と区別するため、stdout が空で stderr が docker のメッセージのときだけ扱う
+      if (r.code === 125 && !r.timedOut && r.stdout === '' && r.stderr.startsWith('docker: ')) {
+        throw unavailable(`Docker でテストを起動できませんでした: ${r.stderr.trim().slice(-500)}`);
+      }
+      normal = !r.timedOut && !o.signal.aborted;
+      return r;
     } finally {
       o.signal.removeEventListener('abort', onAbort);
+      // 正常終了なら --rm で消えている。それ以外（タイムアウト・中止・起動失敗）は残りを確実に消す
+      if (!normal) await remove();
     }
-    if (r.timedOut) await kill();
-    // 125 = docker 自体の失敗（デーモン未起動・イメージ取得不可・オプション不正）。テストの失敗とは区別する
-    // run() は spawn 失敗（docker コマンドが無い）を例外にせず stderr に残すため、そこも拾う
-    const spawnFailed = /^(ENOENT|EACCES): /m.test(r.stderr);
-    if ((r.code === 125 || spawnFailed) && !r.timedOut) {
-      throw new RunnerError(`Docker でテストを起動できませんでした: ${r.stderr.trim().slice(-500)}`, 'TEST_SANDBOX_UNAVAILABLE', false);
-    }
-    return r;
   }
 }

@@ -59,12 +59,15 @@ export interface StructuredRequest<T> {
   system: string;
   user: string;
   worktree: string;
+  /** 記録済みの gitDir（作業ツリーの .git を信用せずに git を読むため） */
+  gitDir?: string;
 }
 
 export interface DevelopRequest {
   system: string;
   user: string;
   worktree: string;
+  gitDir?: string;
 }
 
 /**

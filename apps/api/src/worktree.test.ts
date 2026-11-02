@@ -9,6 +9,9 @@ import { basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GithubRepoHost } from './github/repoHost';
+import { ClaudeRunner } from './agents/claude/runner';
+import type { TestSandbox } from './agents/claude/testSandbox';
+import type { StepExecutionContext } from './agents/runner';
 import { assertGitLink, changedPaths, ensureWorktree, headSha, removeWorktree } from './agents/claude/git';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-wt-'));
@@ -90,5 +93,21 @@ describe('worktree', () => {
     const res = await host.publish(ctx, wt, remote, { branch: 'ai/run-h', existing: null, title: 't', body: 'b' });
     expect(res.headSha).toBe(wt.baseSha);
     expect(git(bare, 'rev-parse', 'refs/heads/ai/run-h').trim()).toBe(wt.baseSha);
+  });
+
+  it('Tester の実行が .git を書き換えたら、テスト工程が GIT_LINK_TAMPERED で止まる', async () => {
+    const sandbox: TestSandbox = {
+      exec: async (_cmd, _args, o) => {
+        writeFileSync(join(o.worktree, '.git'), 'gitdir: /tmp/evil\n');
+        return { code: 0, stdout: '', stderr: '', timedOut: false };
+      },
+    };
+    const runner = new ClaudeRunner({ worktreesDir: wtDir, testTimeoutMs: 1000, testSandbox: sandbox, backend: {} as never });
+    const ctx = {
+      runId: 'run_t', stepId: 's1', key: 'test', attempt: 1, branch: 'ai/run-t', runtime: 'claude', signal: new AbortController().signal,
+      localRepo: { path: repo, testCommand: 'echo hi', testImage: null }, remote: null,
+      tool: async () => ({ allowed: true, reason: '' }), log: async () => undefined, artifact: async () => undefined,
+    } as unknown as StepExecutionContext;
+    await expect(runner.execute(ctx)).rejects.toMatchObject({ code: 'GIT_LINK_TAMPERED' });
   });
 });
