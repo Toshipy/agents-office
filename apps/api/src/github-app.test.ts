@@ -331,6 +331,7 @@ beforeAll(async () => {
       agentRuntime: 'claude_code',
       claudeCode: { ...defaultClaudeCodeConfig(), bin: fake.bin },
       githubWebhookSecret: WEBHOOK_SECRET,
+      githubWebhookEnabled: true,
       githubApp: { appId: APP_ID, privateKeyPem: pem, apiUrl, allowedUsers: ['toshipy'] },
       testTimeoutMs: 30_000,
     }),

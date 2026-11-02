@@ -27,6 +27,7 @@ async function main() {
   if (config.seedDemo) await seedIfEmpty(services);
   await services.engine.start();
   services.dispatcher.start();
+  services.poller?.start();
   services.seats.start();
   const demo = new DemoTraffic(services);
   if (config.enableDevRoutes) demo.start();
@@ -44,6 +45,7 @@ async function main() {
     shuttingDown = true;
     log.info('shutting down', { signal });
     demo.stop();
+    services.poller?.stop();
     services.dispatcher.stop();
     services.seats.stop();
     await services.engine.stop();

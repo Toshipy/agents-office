@@ -26,6 +26,7 @@ import { removeWorktree } from './agents/claude/git';
 import { GithubApp } from './github/app';
 import { GithubRepoHost } from './github/repoHost';
 import { Dispatcher } from './github/dispatcher';
+import { GithubPoller } from './github/poller';
 import { MAX_WEBHOOK_BYTES, receiveGithubWebhook } from './github/webhook';
 import { SeatWatcher } from './services/office';
 import { csrfGuard, requireAuth, type AuthContext } from './auth/session';
@@ -48,6 +49,8 @@ export interface Services {
   seats: SeatWatcher;
   /** GitHub App 連携（未設定なら null = シミュレーターのみ） */
   github: GithubApp | null;
+  /** GitHub のポーリング（GitHub App 未設定なら null） */
+  poller: GithubPoller | null;
 }
 
 export type AppEnv = {
@@ -101,7 +104,8 @@ export async function createServices(
   const engine = new WorkflowEngine(db, bus, store, runner, config);
   const dispatcher = new Dispatcher(db, bus, engine, github);
   const seats = new SeatWatcher(db, bus);
-  return { db, client, config, bus, store, engine, dispatcher, seats, github };
+  const poller = github ? new GithubPoller(db, github, config.githubPollMs, config.githubLogin) : null;
+  return { db, client, config, bus, store, engine, dispatcher, seats, github, poller };
 }
 
 export function createApp(s: Services) {
@@ -155,8 +159,8 @@ export function createApp(s: Services) {
     c.json({ ok: true, mode: 'local', inflightSteps: s.engine.inflightCount(), sseClients: s.bus.subscriberCount() }),
   );
 
-  /** GitHub Webhook（ユーザー API とは分離: 基本設計書 6.1） */
-  app.post('/integrations/github/webhook', async (c) => {
+  /** GitHub Webhook（ユーザー API とは分離: 基本設計書 6.1）。既定は無効（ポーリングで代える）。PAW_GITHUB_WEBHOOK=1 のときだけ受ける */
+  if (s.config.githubWebhookEnabled) app.post('/integrations/github/webhook', async (c) => {
     const len = Number(c.req.header('content-length') ?? 0);
     if (len > MAX_WEBHOOK_BYTES) return c.json({ status: 'rejected', code: 'PAYLOAD_TOO_LARGE' }, 413);
     const raw = Buffer.from(await c.req.arrayBuffer());

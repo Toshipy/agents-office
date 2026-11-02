@@ -17,7 +17,7 @@ let app: ReturnType<typeof createApp>;
 
 beforeAll(async () => {
   s = await createServices(
-    loadConfig({ dataDir: 'memory', simSpeed: 0, simRandomFailures: false, seedDemo: false, enableDevRoutes: true, logLevel: 'silent' }),
+    loadConfig({ dataDir: 'memory', simSpeed: 0, simRandomFailures: false, seedDemo: false, enableDevRoutes: true, githubWebhookEnabled: true, logLevel: 'silent' }),
   );
   app = createApp(s);
 });
