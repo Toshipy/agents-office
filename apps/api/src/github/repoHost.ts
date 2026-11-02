@@ -147,7 +147,8 @@ export class GithubRepoHost implements RemoteRepoHost {
     const push = wtArgs(wt, ['push', '--quiet', '--no-verify', remote.cloneUrl, `${args.headSha}:refs/heads/${args.branch}`]);
     const r = await run('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', ...push.args], {
       cwd: push.cwd,
-      env,
+      // 拒否の判定は git の出力の文言で行うため、翻訳されない英語の出力にする
+      env: { ...env, LC_ALL: 'C' },
       timeoutMs: 10 * 60_000,
       signal: ctx.signal,
     });
