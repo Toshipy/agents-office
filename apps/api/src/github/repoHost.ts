@@ -140,7 +140,7 @@ export class GithubRepoHost implements RemoteRepoHost {
     await ctx.log(`GitHub に push: ${args.branch}（${sha.slice(0, 7)}）`);
     if (args.existing) return { number: args.existing.number, url: args.existing.url, headSha: sha };
     try {
-      const pr = await this.app.createDraftPullRequest(remote.installationId, remote.fullName, {
+      const pr = await this.app.createPullRequest(remote.installationId, remote.fullName, {
         title: args.title.slice(0, 250),
         head: args.branch,
         base: remote.defaultBranch,

@@ -84,7 +84,7 @@ describe('worktree', () => {
     execFileSync('git', ['init', '-q', '--bare', bare]);
     const wt = await ensureWorktree(repo, wtDir, 'run_h', 'ai/run-h');
     writeFileSync(join(wt.path, '.git'), 'gitdir: /tmp/elsewhere\n');
-    const host = new GithubRepoHost({ installationToken: async () => 't', createDraftPullRequest: async () => ({ number: 1, htmlUrl: 'u' }) } as never, join(tmp, 'data'));
+    const host = new GithubRepoHost({ installationToken: async () => 't', createPullRequest: async () => ({ number: 1, htmlUrl: 'u' }) } as never, join(tmp, 'data'));
     const ctx = { log: async () => undefined, signal: new AbortController().signal } as never;
     const remote = { provider: 'github', installationId: 1, repositoryId: 1, fullName: 'o/r', defaultBranch: 'main', cloneUrl: bare } as const;
     const res = await host.publish(ctx, wt, remote, { branch: 'ai/run-h', existing: null, title: 't', body: 'b' });
