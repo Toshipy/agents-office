@@ -575,6 +575,21 @@ export class ClaudeRunner implements AgentRunner {
     };
   }
 
+  /**
+   * push が拒否された（承認待ちの間に人が ai/ ブランチへ push した等）: 人のコミットの取り込みを試す。
+   *  - 早送りで取り込めた: HEAD が承認した内容から変わったので、テストと AI レビューからやり直して承認を作り直す（PUBLISH_STALE）
+   *  - 履歴が分岐している: syncBranch の BRANCH_DIVERGED のまま投げ、エンジンが needs_input で人の判断を待つ
+   *  - 取り込むものが無い（取得までの間に GitHub 側が戻った）: 承認した内容のまま、push を再試行する
+   * どれも Run を失敗にしない
+   */
+  private async onPushRejected(ctx: StepExecutionContext, wt: Worktree, remote: NonNullable<StepExecutionContext['remote']>, err: unknown): Promise<never> {
+    if (!(err instanceof RunnerError && err.code === 'GIT_PUSH_REJECTED')) throw err;
+    await ctx.log(`${err.message.split(':')[0]} — GitHub の ${ctx.branch} の人のコミットを取り込みます`, 'error');
+    const synced = await this.opts.remoteHost!.syncBranch(ctx, wt, remote, ctx.branch);
+    if (synced === 'fast_forwarded') throw new PublishStaleError('GitHub 側の人のコミットを取り込んだため、承認した内容から HEAD が変わりました');
+    throw new RunnerError('push が拒否されましたが、取り込むコミットはありませんでした（再試行します）', 'GIT_PUSH_FAILED', true);
+  }
+
   private async pullRequest(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
     // push・PR 作成の前に、作業ツリーの .git が書き換えられていないことを確かめる
     await assertGitLink(wt);
@@ -616,7 +631,7 @@ export class ClaudeRunner implements AgentRunner {
         existing: update ? { number: ctx.pr!.number, url: ctx.pr!.url } : null,
         title: String(approved.title ?? ctx.title),
         body: String(approved.body ?? ''),
-      });
+      }).catch((err) => this.onPushRejected(ctx, wt, remote, err));
       pr = { number: published.number, url: published.url, branch: ctx.branch, headSha: published.headSha, draft: false };
       if (editLabels) {
         // PR は作成済み。ラベルの取り外しに失敗しても Run は止めない（Run は PR 待ちになり、再起動はしない）

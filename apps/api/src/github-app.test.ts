@@ -646,6 +646,42 @@ describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_0
     expect(git(origin, 'rev-parse', `refs/heads/${branch}`)).toBe(moved);
   });
 
+  it('更新の publish 承認待ちの間に人が ai/ ブランチへ push しても、Run を失敗にせず needs_input で判断を求める', async () => {
+    fake.setScenario({
+      plan: [{ output: PLAN }],
+      develop: [
+        { writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Hey';\n" }] },
+        { writes: [{ path: 'src/greet3.ts', content: "export const greet3 = () => 'Hey!';\n" }] },
+      ],
+      review: [{ output: REVIEW }],
+    });
+    const run = await runToReview(12);
+    expect(run.status).toBe('waiting_review');
+    const branch = run.pr!.branch;
+    expect((await webhook('pull_request_review', reviewPayload('toshipy', 'changes_requested', run.pr!.headSha, run.pr!.number, '足して'))).outcome).toBe('revision_started');
+    // 修正が終わり、更新の publish 承認を待っている
+    const pending = await waitFor(async () => {
+      const r = await runRow(run.id);
+      if (r.status === 'failed') return r;
+      return r.status === 'needs_input' && (await pendingPublish(s.db, run.id)) ? r : null;
+    });
+    expect(pending.status).toBe('needs_input');
+    // その間に人が同じブランチへ push した（前の PR の head の上）
+    const humanSha = humanPush(branch, 'src/late-human.ts', 'export const late = 1;\n');
+    await decidePublish(s.db, req, run.id);
+    const paused = await waitFor(async () => {
+      const r = await runRow(run.id);
+      if (r.status === 'failed' || r.status === 'waiting_review') return r;
+      const ap = (await s.db.select().from(approvals)).find((a) => a.runId === run.id && a.status === 'pending' && a.actionType === 'clarification');
+      return r.status === 'needs_input' && ap ? r : null;
+    });
+    expect(paused.status).toBe('needs_input');
+    const [ap] = (await s.db.select().from(approvals)).filter((a) => a.runId === run.id && a.status === 'pending');
+    expect(ap.payload.reason).toBe('branch_diverged');
+    // 人の push は消していない（強制 push しない）
+    expect(git(origin, 'rev-parse', `refs/heads/${branch}`)).toBe(humanSha);
+  });
+
   it('cancels the run when the PR is closed without merging, and rejects forged webhooks', async () => {
     fake.setScenario({ plan: [{ output: PLAN }], develop: [{ writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Hi';\n" }] }], review: [{ output: REVIEW }] });
     await webhook('issues', issuePayload('toshipy', 6));

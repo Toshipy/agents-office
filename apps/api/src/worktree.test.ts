@@ -183,6 +183,81 @@ describe('worktree', () => {
     expect(plain).toContain('--- README');
   });
 
+  describe('承認待ちの間に人が ai/ ブランチへ push していた（push の拒否）', () => {
+    const fakeApp = { installationToken: async () => 't', findOpenPullByHead: async () => null, createPullRequest: async () => ({ number: 1, htmlUrl: 'u' }) } as never;
+    /** bare に ai/ ブランチを置き、Run の worktree（HEAD = 承認する SHA）と、人のコミットを足す関数を返す */
+    async function setup(id: string) {
+      const bare = join(tmp, `remote-${id}.git`);
+      execFileSync('git', ['init', '-q', '--bare', bare]);
+      const branch = `ai/run-${id}`;
+      const wt = await ensureWorktree(repo, wtDir, `run_${id}`, branch);
+      const remote = { provider: 'github', installationId: 1, repositoryId: 1, fullName: 'o/r', defaultBranch: 'main', cloneUrl: bare } as const;
+      const human = (from: string, file: string) => {
+        const work = join(tmp, `human-${id}-${file}`);
+        execFileSync('git', ['clone', '-q', bare, work]);
+        git(work, 'fetch', '-q', wt.path, from);
+        git(work, 'checkout', '-q', '-B', 'h', 'FETCH_HEAD');
+        writeFileSync(join(work, file), 'human\n');
+        git(work, 'add', file);
+        git(work, 'commit', '-q', '-m', 'human');
+        git(work, 'push', '-q', '--force', 'origin', `HEAD:refs/heads/${branch}`);
+        return git(work, 'rev-parse', 'HEAD').trim();
+      };
+      const commit = (file: string) => {
+        writeFileSync(join(wt.path, file), `${file}\n`);
+        git(wt.path, 'add', file);
+        git(wt.path, 'commit', '-q', '-m', file);
+        return git(wt.path, 'rev-parse', 'HEAD').trim();
+      };
+      const host = new GithubRepoHost(fakeApp, join(tmp, 'data'));
+      const ctx = (approvedSha: string) =>
+        ({
+          runId: `run_${id}`, stepId: 's1', key: 'update_pr', attempt: 1, branch, runtime: 'claude', signal: new AbortController().signal,
+          title: 't', issueNumber: null, pr: { number: 7, url: 'u', branch, headSha: 'x', draft: false }, repo: null,
+          previous: { publish: { kind: 'pull_request', headSha: approvedSha, diffSha256: 'x', title: 't', body: 'b', labels: { remove: [], add: [] }, update: true } },
+          localRepo: { path: repo, testCommand: null, testImage: null }, remote,
+          tool: async () => ({ allowed: true, reason: '' }), log: async () => undefined, artifact: async () => undefined,
+        }) as unknown as StepExecutionContext;
+      return { bare, branch, wt, remote, human, commit, host, ctx };
+    }
+
+    it('push の拒否は GIT_PUSH_REJECTED（他の push の失敗と区別する）', async () => {
+      const t = await setup('pa');
+      const prev = t.commit('a.txt');
+      await t.host.publish(t.ctx(prev), t.wt, t.remote, { branch: t.branch, headSha: prev, existing: null, title: 't', body: 'b' });
+      t.human(prev, 'human.txt');
+      const mine = t.commit('b.txt');
+      const err = await t.host.publish(t.ctx(mine), t.wt, t.remote, { branch: t.branch, headSha: mine, existing: null, title: 't', body: 'b' }).catch((e) => e);
+      expect(err).toMatchObject({ code: 'GIT_PUSH_REJECTED' });
+    });
+
+    it('人のコミットと分岐していれば BRANCH_DIVERGED（エンジンが needs_input にする）。GitHub 側は壊さない', async () => {
+      const t = await setup('pb');
+      const prev = t.commit('a.txt');
+      await t.host.publish(t.ctx(prev), t.wt, t.remote, { branch: t.branch, headSha: prev, existing: null, title: 't', body: 'b' });
+      const mine = t.commit('b.txt'); // 修正のコミット（承認する内容）
+      const humanSha = t.human(prev, 'human.txt'); // 承認待ちの間に、人が前の PR の head に足した
+      const runner = new ClaudeRunner({ worktreesDir: wtDir, testTimeoutMs: 1000, testSandbox: {} as never, backend: {} as never, remoteHost: t.host });
+      const err = await runner.execute(t.ctx(mine)).catch((e) => e);
+      expect(err).toMatchObject({ code: 'BRANCH_DIVERGED' });
+      expect(git(t.bare, 'rev-parse', `refs/heads/${t.branch}`).trim()).toBe(humanSha);
+      expect(await headSha(t.wt)).toBe(mine);
+    });
+
+    it('人のコミットが承認した head の先にあれば取り込み、PUBLISH_STALE でテストと AI レビューからやり直す', async () => {
+      const t = await setup('pc');
+      const mine = t.commit('a.txt');
+      // 前回の PR の工程が push の後で落ち、その後に人が同じ head の上へ足した状況
+      await t.host.publish(t.ctx(mine), t.wt, t.remote, { branch: t.branch, headSha: mine, existing: null, title: 't', body: 'b' });
+      const humanSha = t.human(mine, 'human.txt');
+      const runner = new ClaudeRunner({ worktreesDir: wtDir, testTimeoutMs: 1000, testSandbox: {} as never, backend: {} as never, remoteHost: t.host });
+      const err = await runner.execute(t.ctx(mine)).catch((e) => e);
+      expect(err).toMatchObject({ code: 'PUBLISH_STALE' });
+      expect(await headSha(t.wt)).toBe(humanSha);
+      expect(git(t.bare, 'rev-parse', `refs/heads/${t.branch}`).trim()).toBe(humanSha);
+    });
+  });
+
   it('PR の工程は、承認した headSha と worktree の HEAD が違えば何も呼ばずに PUBLISH_STALE で止まる', async () => {
     const runner = new ClaudeRunner({ worktreesDir: wtDir, testTimeoutMs: 1000, testSandbox: {} as never, backend: {} as never });
     const tools: string[] = [];

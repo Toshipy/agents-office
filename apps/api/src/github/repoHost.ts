@@ -151,7 +151,13 @@ export class GithubRepoHost implements RemoteRepoHost {
       timeoutMs: 10 * 60_000,
       signal: ctx.signal,
     });
-    if (r.code !== 0) throw new RunnerError(`ブランチ ${args.branch} を push できません: ${r.stderr.trim().slice(-300)}`, 'GIT_PUSH_FAILED', false);
+    if (r.code !== 0) {
+      // GitHub 側に Run に無いコミットがある（承認待ちの間に人が同じブランチへ push した等）。呼び出し側が取り込みを試す
+      if (/\[rejected\]|non-fast-forward|fetch first/i.test(r.stderr)) {
+        throw new RunnerError(`ブランチ ${args.branch} の GitHub 側に Run に無いコミットがあるため push できません: ${r.stderr.trim().slice(-300)}`, 'GIT_PUSH_REJECTED', false);
+      }
+      throw new RunnerError(`ブランチ ${args.branch} を push できません: ${r.stderr.trim().slice(-300)}`, 'GIT_PUSH_FAILED', false);
+    }
     const sha = args.headSha;
     await ctx.log(`GitHub に push: ${args.branch}（${sha.slice(0, 7)}）`);
     if (args.existing) return { number: args.existing.number, url: args.existing.url, headSha: sha };
