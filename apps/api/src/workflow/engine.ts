@@ -113,6 +113,12 @@ export class WorkflowEngine {
     private readonly config: AppConfig,
   ) {}
 
+  /** 失敗・中止で終わった Issue の Run の GitHub を片付ける処理（GitHub App が無ければ未設定） */
+  private issueCleanup: { onAbandoned(run: RunRow): Promise<void> } | null = null;
+  setIssueCleanup(cleanup: { onAbandoned(run: RunRow): Promise<void> } | null) {
+    this.issueCleanup = cleanup;
+  }
+
   /* ------------------------------------------------------------ */
   /* lifecycle                                                     */
   /* ------------------------------------------------------------ */
@@ -289,6 +295,16 @@ export class WorkflowEngine {
   }
 
   private async cleanupRun(run: RunRow) {
+    // 失敗・中止の Issue Run だけ、agents-office ラベルと自分のアサインを外す（完了は PR・資料の工程が済ませている）
+    if (this.issueCleanup && (run.status === 'failed' || run.status === 'cancelled') && run.source.type === 'github_issue') {
+      try {
+        // 実行中の工程が GitHub を書き換えている途中で外さない
+        await this.waitFlights([...this.inflight.values()].filter((f) => f.runId === run.id));
+        await this.issueCleanup.onAbandoned(run);
+      } catch (err) {
+        log.warn('issue cleanup failed', { runId: run.id, err: String(err) });
+      }
+    }
     if (run.runtime === 'simulated' || !this.runner.onRunFinished) return;
     try {
       // 実行中の工程（CLI プロセス）が終わる前に worktree を消さない
@@ -1096,8 +1112,9 @@ export class WorkflowEngine {
       diffSha256: p.diffSha256,
       title: p.title,
       body: p.body,
-      // 終わりのラベル操作は後の工程で足す。今は何も変えない
-      labels: { remove: [] as string[], add: [] as string[] },
+      // 終わりのラベル操作: PR を作るとき（GitHub App の Issue の Run）だけ agents-office を外す。更新では何も変えない
+      // 外すのは承認の後の PR の工程。承認の前には何も変えない
+      labels: { remove: !update && (await this.materialsAllowed(run)) ? [AGENTS_OFFICE_LABEL] : [], add: [] as string[] },
       update,
     });
   }

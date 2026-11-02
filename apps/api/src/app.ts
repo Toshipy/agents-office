@@ -28,6 +28,7 @@ import { GithubRepoHost } from './github/repoHost';
 import { Dispatcher } from './github/dispatcher';
 import { GithubPoller } from './github/poller';
 import { IssueIntake } from './github/issueIntake';
+import { IssueCleanup } from './github/issueCleanup';
 import { MAX_WEBHOOK_BYTES, receiveGithubWebhook } from './github/webhook';
 import { SeatWatcher } from './services/office';
 import { csrfGuard, requireAuth, type AuthContext } from './auth/session';
@@ -106,6 +107,7 @@ export async function createServices(
   const store = new ArtifactStore(db, config.dataDir === 'memory' ? 'memory' : config.artifactsDir);
   const engine = new WorkflowEngine(db, bus, store, runner, config);
   const issueIntake = new IssueIntake(db, engine, github, config.githubLogin);
+  if (github) engine.setIssueCleanup(new IssueCleanup(db, github, config.githubLogin));
   const dispatcher = new Dispatcher(db, bus, engine, github, issueIntake);
   const seats = new SeatWatcher(db, bus);
   const poller = github ? new GithubPoller(db, github, config.githubPollMs, config.githubLogin) : null;

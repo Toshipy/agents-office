@@ -270,6 +270,9 @@ const waitStatusApproving = (id: string, ...st: string[]) => waitStatusApproving
 const branchOf = (runId: string) => `ai/run-${runId.slice(4, 14).toLowerCase()}`;
 /** bare リポジトリ（GitHub の代わり）にそのブランチが push されているか */
 const remoteHasBranch = (branch: string) => git(origin, 'for-each-ref', '--format=%(refname)', `refs/heads/${branch}`) !== '';
+/** Issue から agents-office ラベルを外す要求の数 */
+const labelRemovals = (n: number) => requests.filter((r) => r.method === 'DELETE' && r.path === `/repos/${FULL_NAME}/issues/${n}/labels/agents-office`).length;
+const assigneeRemovals = (n: number) => requests.filter((r) => r.method === 'DELETE' && r.path === `/repos/${FULL_NAME}/issues/${n}/assignees`).length;
 const pullPosts = () => requests.filter((r) => r.method === 'POST' && r.path === `/repos/${FULL_NAME}/pulls`).length;
 
 const repository = { id: REPO_ID, full_name: FULL_NAME };
@@ -423,6 +426,9 @@ describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_0
     const ap = await pendingPublish(s.db, created.id);
     expect(ap!.payload).toMatchObject({ kind: 'pull_request', title: '#5 greet の文言を変更', update: false });
     expect(String(ap!.payload.body).split('\n')[0]).toBe('Closes #5');
+    // 終わりのラベル操作は承認に載せ、承認の前には外さない
+    expect(ap!.payload.labels).toEqual({ remove: ['agents-office'], add: [] });
+    expect(labelRemovals(5)).toBe(0);
     await decidePublish(s.db, req, created.id);
 
     const run = await waitStatus(created.id, 'waiting_review', 'failed');
@@ -440,6 +446,9 @@ describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_0
     expect(pulls[0].body.split('\n')[0]).toBe('Closes #5');
     expect(pulls[0].body).toContain('この PR は agents-office が作りました。マージは人が行います。');
     expect(run.pr!.url).toBe(`https://github.com/${FULL_NAME}/pull/12`);
+    // PR を作った後に agents-office だけ外す（アサインは残す）
+    expect(labelRemovals(5)).toBe(1);
+    expect(assigneeRemovals(5)).toBe(0);
 
     // トークンを残さない: 管理クローンの remote URL・git 設定に資格情報が無い。Claude Code には GitHub のトークンを渡さない
     const managed = join(dataRoot, 'repos', String(REPO_ID));
@@ -476,6 +485,9 @@ describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_0
     expect(merged.outcome).toBe('run_completed_merged');
     expect((await runRow(run.id)).status).toBe('completed');
     expect(requests.some((r) => r.path.includes('/merge'))).toBe(false);
+    // PR の更新では何も変えず、マージで完了した Run は片付け直さない
+    expect(labelRemovals(5)).toBe(1);
+    expect(assigneeRemovals(5)).toBe(0);
   });
 
   it('PR 作成の再試行で既存の PR を使い、422 で失敗しない', async () => {
@@ -642,6 +654,9 @@ describe('GitHub App integration (mock GitHub API + bare repo)', { timeout: 30_0
     const closed = await webhook('pull_request', { action: 'closed', pull_request: { number: run.pr!.number, merged: false }, repository, installation, sender: { login: 'toshipy' } });
     expect(closed.outcome).toBe('run_cancelled_pr_closed');
     expect((await runRow(run.id)).status).toBe('cancelled');
+    // PR 作成で 1 回、マージされずに閉じて中止になったときにもう 1 回外す（Issue にコメントは書かない）
+    await waitFor(async () => labelRemovals(6) >= 2);
+    expect(requests.some((r) => r.method === 'POST' && r.path === `/repos/${FULL_NAME}/issues/6/comments`)).toBe(false);
 
     const raw = JSON.stringify(issuePayload('toshipy', 7));
     const forged = await app.request('/integrations/github/webhook', {

@@ -575,7 +575,7 @@ export class ClaudeRunner implements AgentRunner {
     // push・PR 作成の前に、作業ツリーの .git が書き換えられていないことを確かめる
     await assertGitLink(wt);
     // 人が publish 承認で確かめた head と今の HEAD が違えば、承認していない内容なので何も書かない（エンジンが承認を作り直す）
-    const approved = ctx.previous.publish as { headSha?: unknown; title?: unknown; body?: unknown } | undefined;
+    const approved = ctx.previous.publish as { headSha?: unknown; title?: unknown; body?: unknown; labels?: { remove?: unknown; add?: unknown } } | undefined;
     const head = await headSha(wt);
     if (!approved || approved.headSha !== head) {
       await ctx.log(`承認した head（${String(approved?.headSha ?? 'なし').slice(0, 12)}）と worktree の HEAD（${head.slice(0, 12)}）が違うため、push せずテストと AI レビューからやり直します`, 'error');
@@ -592,6 +592,14 @@ export class ClaudeRunner implements AgentRunner {
       update ? `PR #${ctx.pr!.number} を更新` : `PR を作成${remote ? '（GitHub）' : '（ローカル）'}`,
     );
     if (!res.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${res.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
+    // PR の後に行うラベル操作は、人が承認した内容（publish 承認の labels）だけ。書き込みの前にポリシーで確かめる
+    const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    const labels = { remove: strs(approved.labels?.remove), add: strs(approved.labels?.add) };
+    const editLabels = Boolean(remote && ctx.issueNumber && (labels.remove.length || labels.add.length));
+    if (editLabels) {
+      const lab = await ctx.tool('github.issue.labels', { repo: ctx.repo, issue: ctx.issueNumber }, `Issue #${ctx.issueNumber} のラベル: 外す ${labels.remove.join(', ') || 'なし'} / 付ける ${labels.add.join(', ') || 'なし'}`);
+      if (!lab.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${lab.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
+    }
     const diff = await diffFromBase(wt, wt.baseSha);
     const testsLine = testsLineOf(ctx.previous);
     let pr: { number: number; url: string; branch: string; headSha: string; draft: false };
@@ -606,6 +614,14 @@ export class ClaudeRunner implements AgentRunner {
         body: String(approved.body ?? ''),
       });
       pr = { number: published.number, url: published.url, branch: ctx.branch, headSha: published.headSha, draft: false };
+      if (editLabels) {
+        // PR は作成済み。ラベルの取り外しに失敗しても Run は止めない（Run は PR 待ちになり、再起動はしない）
+        try {
+          await this.opts.remoteHost!.editIssueLabels(ctx, remote, ctx.issueNumber!, labels);
+        } catch (err) {
+          await ctx.log(`PR は作成しましたが Issue #${ctx.issueNumber} のラベルを変更できませんでした: ${String((err as Error)?.message ?? err).slice(0, 200)}`, 'error');
+        }
+      }
     } else {
       const number = update ? ctx.pr!.number : await ctx.allocatePrNumber();
       pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: head, draft: false };

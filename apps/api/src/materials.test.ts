@@ -337,6 +337,10 @@ describe('資料モード（偽 CLI + GitHub モック）', { timeout: 60_000 },
     await decidePublish(s.db, req, runId, 'reject');
     expect((await waitStatus(runId, 'cancelled', 'failed', 'completed')).status).toBe('cancelled');
     expect(gh.issues.get(22)!.comments).toHaveLength(0);
+    // 却下で中止になった Run は agents-office を外す。もともと自分が担当だった Issue のアサインは外さない
+    await waitFor(async () => !gh.issues.get(22)!.labels.includes('agents-office'));
+    expect(gh.issues.get(22)!.assignees).toEqual([LOGIN]);
+    expect(commentPosts(22)).toBe(0);
   });
 
   it('資料が 2 回とも形式に合わなければ失敗にし、Issue には何も書かない', async () => {

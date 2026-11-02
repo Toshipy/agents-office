@@ -7,6 +7,7 @@ import { eq } from 'drizzle-orm';
 import { loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
 import { IssueIntake } from './github/issueIntake';
+import { IssueCleanup } from './github/issueCleanup';
 import type { GithubApp } from './github/app';
 import { repositoryBindings, runs, workspaces } from './db/schema';
 
@@ -296,5 +297,62 @@ describe('Issue API', () => {
     const id = ((await p.json()) as any).id;
     const res = await app.request(`/v1/projects/${id}/issues`, { headers: headers() });
     expect(res.status).toBe(409);
+  });
+});
+
+describe('Run の終わりの片付け（IssueCleanup）', () => {
+  const commentCalls = () => (fake as any).commentOnIssue?.mock?.calls?.length ?? 0;
+  const waitCalls = async (fn: ReturnType<typeof vi.fn>, n = 1) => {
+    for (let i = 0; i < 100 && fn.mock.calls.length < n; i++) await new Promise((r) => setTimeout(r, 10));
+  };
+  beforeEach(() => {
+    s.engine.setIssueCleanup(new IssueCleanup(s.db, fake, LOGIN));
+  });
+
+  it('失敗した Run は agents-office と自分のアサインを外し、Issue にコメントを書かない', async () => {
+    state = [mk(40)];
+    const r = await intake.start(binding, 40, { via: 'ui', labeledBy: null, guidance: null });
+    const runId = (r as { runId: string }).runId;
+    expect(state[0].labels).toContain('agents-office');
+    expect(state[0].assignees).toEqual([LOGIN]);
+    await s.engine.transition(runId, 'planning');
+    await s.engine.failRun(runId, 'TEST_FAILURE', '失敗させた');
+    await waitCalls(fake.removeAssignees as any);
+    expect(fake.removeLabel).toHaveBeenCalledWith(INSTALLATION_ID, FULL_NAME, 40, 'agents-office');
+    expect(fake.removeAssignees).toHaveBeenCalledWith(INSTALLATION_ID, FULL_NAME, 40, [LOGIN]);
+    expect(state[0].labels).not.toContain('agents-office');
+    expect(state[0].assignees).toEqual([]);
+    expect(commentCalls()).toBe(0);
+  });
+
+  it('中止した Run も同じ。もともと自分が担当だった Issue のアサインは外さない', async () => {
+    state = [mk(41, { assignees: [LOGIN] })];
+    const r = await intake.start(binding, 41, { via: 'ui', labeledBy: null, guidance: null });
+    const runId = (r as { runId: string }).runId;
+    await s.engine.cancelRun(runId, 'やめる');
+    await waitCalls(fake.removeLabel as any, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fake.removeLabel).toHaveBeenCalledWith(INSTALLATION_ID, FULL_NAME, 41, 'agents-office');
+    expect(fake.removeAssignees).not.toHaveBeenCalled();
+    expect(state[0].assignees).toEqual([LOGIN]);
+    expect(commentCalls()).toBe(0);
+  });
+
+  it('GitHub が失敗しても投げず、ラベルが外せなくてもアサインは外す', async () => {
+    state = [mk(42)];
+    const r = await intake.start(binding, 42, { via: 'ui', labeledBy: null, guidance: null });
+    const [run] = await s.db.select().from(runs).where(eq(runs.id, (r as { runId: string }).runId));
+    (fake.removeLabel as any).mockRejectedValueOnce(new Error('boom'));
+    await expect(new IssueCleanup(s.db, fake, LOGIN).onAbandoned(run)).resolves.toBeUndefined();
+    expect(fake.removeAssignees).toHaveBeenCalledWith(INSTALLATION_ID, FULL_NAME, 42, [LOGIN]);
+  });
+
+  it('Issue の Run でなければ何もしない', async () => {
+    state = [mk(43)];
+    const r = await intake.start(binding, 43, { via: 'ui', labeledBy: null, guidance: null });
+    const [run] = await s.db.select().from(runs).where(eq(runs.id, (r as { runId: string }).runId));
+    vi.clearAllMocks();
+    await new IssueCleanup(s.db, fake, LOGIN).onAbandoned({ ...run, source: { type: 'manual' } as any });
+    expect(fake.removeLabel).not.toHaveBeenCalled();
   });
 });
