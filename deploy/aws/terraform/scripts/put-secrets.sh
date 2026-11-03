@@ -4,7 +4,7 @@
 #
 #   AWS_REGION=ap-northeast-1 ./scripts/put-secrets.sh
 #
-# 自動で作る値（Webhook secret・セッション鍵・登録コード）は、既にあれば作り直さない。
+# 自動で作る値（セッション鍵・登録コード）は、既にあれば作り直さない。
 set -euo pipefail
 
 REGION="${AWS_REGION:-ap-northeast-1}"
@@ -52,15 +52,11 @@ put_secure tailscale_auth_key "$tskey"
 
 echo
 echo "4) 自動で作る値"
-for name in github_webhook_secret session_secret; do
-  if exists "$name"; then echo "  - $PREFIX/$name は既にあるので変えません"; else put_secure "$name" "$(openssl rand -hex 32)"; fi
-done
+if exists session_secret; then echo "  - $PREFIX/session_secret は既にあるので変えません"; else put_secure session_secret "$(openssl rand -hex 32)"; fi
 if exists signup_code; then echo "  - $PREFIX/signup_code は既にあるので変えません"; else put_secure signup_code "$(openssl rand -hex 16)"; fi
 
 echo
 echo "------------------------------------------------------------"
-echo "GitHub App の Webhook secret に設定する値:"
-echo "  $(show github_webhook_secret)"
 echo "最初の新規登録で入力する登録コード:"
 echo "  $(show signup_code)"
 echo "------------------------------------------------------------"

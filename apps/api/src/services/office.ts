@@ -13,6 +13,7 @@ import {
 } from '@paw/contracts';
 import { buildProjectStats, buildSeats, runProgress, type ProjectionInput } from '@paw/office-model';
 import type { Db } from '../db/client';
+import { AGENTS_OFFICE_LABEL } from '../github/labels';
 import {
   agentDefinitions,
   approvals,
@@ -155,7 +156,8 @@ export async function buildOfficeState(db: Db, engine: WorkflowEngine, workspace
             fullName: b.fullName,
             claudeReady: engine.runtimeFor(b) !== 'simulated',
             automationEnabled: b.automationEnabled,
-            triggerLabel: b.policy.triggerLabel,
+            // GitHub App 接続の Repo は起動ラベルが agents-office 固定（保存値に関わらず）
+            triggerLabel: b.verification === 'github_app' ? AGENTS_OFFICE_LABEL : b.policy.triggerLabel,
             maxRevisionAttempts: b.policy.maxRevisionAttempts,
             events: b.policy.events,
           }

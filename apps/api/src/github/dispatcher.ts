@@ -12,6 +12,8 @@ import type { EventBus } from '../events/bus';
 import { log } from '../lib/logger';
 import type { WorkflowEngine } from '../workflow/engine';
 import type { GithubApp } from './app';
+import type { IssueIntake } from './issueIntake';
+import { AGENTS_OFFICE_LABEL } from './labels';
 
 const MAX_DELIVERY_ATTEMPTS = 5;
 
@@ -28,6 +30,8 @@ export class Dispatcher {
     private readonly engine: WorkflowEngine,
     /** GitHub App 連携時のみ。Issue・レビューを受け付ける GitHub ユーザーを限定する */
     private readonly github: GithubApp | null = null,
+    /** Issue から Run を作る入口（アサイン・コメント取得を含む） */
+    private readonly intake: IssueIntake | null = null,
   ) {}
 
   /**
@@ -133,7 +137,8 @@ export class Dispatcher {
     const eventName = `issues.${action}` as 'issues.opened' | 'issues.labeled';
     if (!binding.policy.events.includes(eventName)) return ignore('event_not_enabled');
     if (!binding.automationEnabled) return ignore('automation_disabled');
-    const label = binding.policy.triggerLabel;
+    // GitHub App の Repo は起動ラベル固定。simulated だけ policy の値を使う
+    const label = binding.verification === 'github_app' ? AGENTS_OFFICE_LABEL : binding.policy.triggerLabel;
     const labels: string[] = Array.isArray(issue.labels)
       ? issue.labels.map((l: any) => String(l?.name ?? '')).filter(Boolean)
       : [];
@@ -145,41 +150,21 @@ export class Dispatcher {
     if (!ws) return ignore('workspace_missing');
     if (ws.paused) return ignore('workspace_paused');
     if ((await this.engine.monthCostUsd(ws.id)) >= ws.monthlyBudgetUsd) return ignore('budget_exceeded');
-    const issueKey = `${binding.repositoryId}#${issueNumber}`;
-    // 同一 Issue で同時に 2 件の開発 Run を起動しない（要件定義書 5.2）
-    const active = await this.db
-      .select({ id: runs.id })
-      .from(runs)
-      .where(
-        and(
-          eq(runs.workspaceId, ws.id),
-          eq(runs.issueKey, issueKey),
-          sql`${runs.status} not in (${sql.join(
-            TERMINAL_RUN_STATUSES.map((s) => sql`${s}`),
-            sql`, `,
-          )})`,
-        ),
-      );
-    if (active.length > 0) return ignore('duplicate_issue_run');
-    const title = String(issue.title ?? '').slice(0, 110) || `Issue #${issueNumber}`;
-    const body = String(issue.body ?? '').slice(0, 4000);
-    const run = await this.engine.createRun({
-      workspaceId: ws.id,
-      projectId: project.id,
-      title: `#${issueNumber} ${title}`,
-      request: body ? `${title}\n\n${body}` : title,
-      source: {
-        type: 'github_issue',
-        issueNumber,
-        issueUrl: typeof issue.html_url === 'string' ? issue.html_url.slice(0, 300) : undefined,
-        deliveryId: d.deliveryId,
-        repositoryId: binding.repositoryId,
+    // 同一 Issue の重複・他人の担当・夜間の確認、アサイン、Run 作成は IssueIntake が行う
+    if (!this.intake) return ignore('intake_unavailable');
+    const result = await this.intake.start(binding, issueNumber, {
+      via: 'label',
+      labeledBy: typeof p.sender?.login === 'string' ? p.sender.login : null,
+      guidance: null,
+      deliveryId: d.deliveryId,
+      payload: {
+        title: String(issue.title ?? ''),
+        body: String(issue.body ?? '').slice(0, 4000),
+        htmlUrl: typeof issue.html_url === 'string' ? issue.html_url : undefined,
       },
-      issueKey,
-      maxRevisionAttempts: binding.policy.maxRevisionAttempts,
-      budgetLimitUsd: ws.runBudgetUsd,
-      runtime: this.engine.runtimeFor(binding),
     });
+    if ('skipped' in result) return ignore(result.skipped);
+    const run = { id: result.runId };
     await this.record(binding, d, true, 'run_created', run.id);
     return 'run_created';
   }

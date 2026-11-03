@@ -5,8 +5,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 import { loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
-import { auditLogs, runSteps, runs, stepLogs, webhookDeliveries, workspaces } from './db/schema';
+import { auditLogs, repositoryBindings, runSteps, runs, stepLogs, webhookDeliveries, workspaces } from './db/schema';
 import { signGithubPayload } from './github/webhook';
+import { deliver } from './github/simulator';
 import { WorkflowEngine } from './workflow/engine';
 import { SimulatedRunner } from './agents/simulated';
 import { authorizeTool } from './workflow/toolBroker';
@@ -16,7 +17,7 @@ let app: ReturnType<typeof createApp>;
 
 beforeAll(async () => {
   s = await createServices(
-    loadConfig({ dataDir: 'memory', simSpeed: 0, simRandomFailures: false, seedDemo: false, enableDevRoutes: true, logLevel: 'silent' }),
+    loadConfig({ dataDir: 'memory', simSpeed: 0, simRandomFailures: false, seedDemo: false, enableDevRoutes: true, githubWebhookEnabled: true, logLevel: 'silent' }),
   );
   app = createApp(s);
 });
@@ -73,7 +74,7 @@ async function setupProject(c: Client, opts: { automation?: boolean; maxRevision
   if (opts.automation !== undefined || opts.maxRevisionAttempts !== undefined) {
     const r = await c.json('PUT', `/v1/projects/${p.body.id}/automation-policy`, {
       enabled: opts.automation ?? false,
-      triggerLabel: 'ai:ready',
+      triggerLabel: 'agents-office',
       events: ['issues.opened', 'issues.labeled'],
       maxRevisionAttempts: opts.maxRevisionAttempts ?? 3,
     });
@@ -175,6 +176,8 @@ describe('AT-006 / AT-007 Issue → Draft PR → review loop', () => {
     expect(d.body.usage.measurement).toBe('estimated');
     const ap = d.body.approvals[0];
     expect(ap.actionType).toBe('pr_review');
+    // simulated の Run は何も書かないため、publish 承認を通らずに PR の工程へ進む（Ruling 3）
+    expect(d.body.approvals.some((x: any) => x.actionType === 'publish')).toBe(false);
     // PR レビューは GitHub 側で行う
     const direct = await a.json('POST', `/v1/approvals/${ap.id}/decision`, { decision: 'approve', expectedVersion: ap.version, confirmationDigest: ap.payloadDigest });
     expect(direct.status).toBe(409);
@@ -213,6 +216,27 @@ describe('AT-006 / AT-007 Issue → Draft PR → review loop', () => {
   });
 });
 
+describe('PR のマージはどの状態の Run も完了にする', () => {
+  it('validating の Run の PR がマージされたら completed になる', async () => {
+    const a = await signup('mergeany');
+    const { projectId } = await setupProject(a);
+    const runId = await createRun(a, projectId);
+    const waiting = await waitStatus(runId, 'waiting_review');
+    // PR は作られたが、まだ検証中という状態を作る
+    await s.db.update(runs).set({ status: 'validating' }).where(eq(runs.id, runId));
+    const [binding] = await s.db.select().from(repositoryBindings).where(eq(repositoryBindings.projectId, projectId));
+    await deliver(s.db, s.config, 'pull_request', {
+      action: 'closed',
+      pull_request: { number: waiting.pr!.number, merged: true, head: { sha: waiting.pr!.headSha, ref: waiting.pr!.branch } },
+      repository: { id: binding.repositoryId, full_name: binding.fullName },
+      installation: { id: binding.installationId },
+      sender: { login: 'octocat' },
+    });
+    const done = await waitStatus(runId, 'completed');
+    expect(done.finishedAt).not.toBeNull();
+  });
+});
+
 describe('AT-004 / AT-005 webhooks', () => {
   async function send(event: string, payload: object, opts: { deliveryId?: string; secret?: string } = {}) {
     const raw = JSON.stringify(payload);
@@ -240,7 +264,7 @@ describe('AT-004 / AT-005 webhooks', () => {
     const a = await signup('hook');
     const p = await setupProject(a, { automation: true });
     const deliveryId = crypto.randomUUID();
-    const payload = issuePayload(p, 7, ['ai:ready']);
+    const payload = issuePayload(p, 7, ['agents-office']);
 
     const forged = await send('issues', payload, { secret: 'wrong-secret' });
     expect(forged.status).toBe(401);
@@ -274,7 +298,7 @@ describe('AT-004 / AT-005 webhooks', () => {
   it('does not start runs when automation is OFF or label does not match', async () => {
     const a = await signup('off');
     const off = await setupProject(a);
-    await send('issues', issuePayload(off, 1, ['ai:ready']));
+    await send('issues', issuePayload(off, 1, ['agents-office']));
     const on = await setupProject(a, { automation: true });
     await send('issues', issuePayload(on, 2, ['bug']));
     await waitFor(async () => {
@@ -298,7 +322,7 @@ describe('simulator isolation', () => {
     const shared = 'shared-org/shared-repo';
     const a = await setupProject(alice, { automation: true, repo: shared });
     await setupProject(bob, { automation: true, repo: shared });
-    const sent = await alice.json('POST', '/v1/dev/github/simulate', { kind: 'issue', projectId: a.projectId, title: '共有 Repo の Issue', labels: ['ai:ready'] });
+    const sent = await alice.json('POST', '/v1/dev/github/simulate', { kind: 'issue', projectId: a.projectId, title: '共有 Repo の Issue', labels: ['agents-office'] });
     expect(sent.status).toBe(200);
     const byBob = await bob.json('POST', '/v1/dev/github/simulate', { kind: 'redeliver', deliveryId: sent.body.deliveryId });
     expect(byBob.status).toBe(404);
@@ -364,14 +388,14 @@ describe('AT-009 forbidden operations', () => {
     expect((await runRow(runId)).status).toBe('waiting_review');
   });
 
-  it('tool broker enforces repo, branch and draft constraints', () => {
+  it('tool broker enforces repo and branch constraints', () => {
     const base = { role: 'tool_broker' as const, allowedTools: [], boundRepo: 'me/repo' };
-    expect(authorizeTool({ ...base, tool: 'github.pull_request.create_draft', args: { repo: 'me/repo', branch: 'ai/run-x', draft: true } }).allowed).toBe(true);
-    expect(authorizeTool({ ...base, tool: 'github.pull_request.create_draft', args: { repo: 'other/repo', branch: 'ai/run-x', draft: true } }).allowed).toBe(false);
+    expect(authorizeTool({ ...base, tool: 'github.pull_request.create', args: { repo: 'me/repo', branch: 'ai/run-x', draft: true } }).allowed).toBe(true);
+    expect(authorizeTool({ ...base, tool: 'github.pull_request.create', args: { repo: 'other/repo', branch: 'ai/run-x', draft: true } }).allowed).toBe(false);
     expect(authorizeTool({ ...base, tool: 'github.branch.push', args: { repo: 'me/repo', branch: 'main' } }).allowed).toBe(false);
-    expect(authorizeTool({ ...base, tool: 'github.pull_request.create_draft', args: { repo: 'me/repo', branch: 'ai/run-x', draft: false } }).allowed).toBe(false);
+    expect(authorizeTool({ ...base, tool: 'github.pull_request.create', args: { repo: 'me/repo', branch: 'main', draft: false } }).allowed).toBe(false);
     expect(authorizeTool({ ...base, tool: 'github.pull_request.merge', args: { repo: 'me/repo' } }).allowed).toBe(false);
-    expect(authorizeTool({ role: 'developer', allowedTools: ['worktree.write'], boundRepo: 'me/repo', tool: 'github.pull_request.create_draft', args: {} }).allowed).toBe(false);
+    expect(authorizeTool({ role: 'developer', allowedTools: ['worktree.write'], boundRepo: 'me/repo', tool: 'github.pull_request.create', args: {} }).allowed).toBe(false);
   });
 });
 

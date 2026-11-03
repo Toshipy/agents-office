@@ -112,6 +112,8 @@ export const repositoryBindings = pgTable(
     localPath: text('local_path'),
     /** Tester が worktree で実行するコマンド（利用者が明示的に設定したものだけ実行） */
     testCommand: text('test_command'),
+    /** Tester のコンテナイメージ（null なら PAW_TEST_IMAGE の既定） */
+    testImage: text('test_image'),
     nextPrNumber: integer('next_pr_number').notNull().default(1),
     nextIssueNumber: integer('next_issue_number').notNull().default(1),
     createdAt: ts('created_at').notNull().defaultNow(),
@@ -149,6 +151,15 @@ export interface RunSource {
   deliveryId?: string;
   repositoryId?: number;
   requestedBy?: string;
+  /** 着手時に自分（t.arai）を Issue のアサインにした。終わりや失敗で外す対象 */
+  assignedBySelf?: boolean;
+  /** 画面の「AI に任せる」で添えた指示（信頼できる追加指示）。run.guidance（再開時の回答）とは別。停止の判定には使わない */
+  delegateGuidance?: string;
+  /**
+   * 着手時の Issue コメントから決めた振り分け（decideFromComments）。前の資料コメントの後に人のコメントが
+   * あれば 'implement'（会議で決まったものとして、計画が materials を選んでも実装に進む）
+   */
+  modeFromComments?: 'implement';
 }
 
 export interface RunPr {
@@ -264,7 +275,7 @@ export const artifacts = pgTable(
     workspaceId: text('workspace_id').notNull(),
     runId: text('run_id').notNull(),
     stepId: text('step_id'),
-    kind: text('kind').$type<'plan' | 'diff' | 'test_report' | 'review' | 'draft_pr' | 'log'>().notNull(),
+    kind: text('kind').$type<'plan' | 'diff' | 'test_report' | 'review' | 'draft_pr' | 'materials' | 'log'>().notNull(),
     title: text('title').notNull(),
     /** workspaces/<ws>/runs/<run>/<file>。パス名はアクセス制御にならない（7.3）— API で所有権を確認 */
     uri: text('uri').notNull(),

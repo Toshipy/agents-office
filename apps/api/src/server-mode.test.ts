@@ -50,7 +50,7 @@ describe('server mode signup', () => {
     const base = { username: 'owner', displayName: 'Owner', password: 'long-password-1234' };
     const noCode = await signup(base);
     expect(noCode.status).toBe(403);
-    expect((await noCode.json()).code).toBe('SIGNUP_CODE_INVALID');
+    expect(((await noCode.json()) as { code: string }).code).toBe('SIGNUP_CODE_INVALID');
     expect((await signup({ ...base, signupCode: 'wrong' })).status).toBe(403);
 
     const ok = await signup({ ...base, signupCode: CODE });
@@ -63,8 +63,8 @@ describe('server mode signup', () => {
     // コードを知っていても 2 人目は登録できない
     const second = await signup({ ...base, username: 'intruder', signupCode: CODE });
     expect(second.status).toBe(403);
-    expect((await second.json()).code).toBe('SIGNUP_DISABLED');
-    expect((await (await app.request('/v1/auth/config')).json()).signup).toBe(false);
+    expect(((await second.json()) as { code: string }).code).toBe('SIGNUP_DISABLED');
+    expect(((await (await app.request('/v1/auth/config')).json()) as { signup: boolean }).signup).toBe(false);
 
     // 公開 URL 以外の Origin からの更新リクエストは拒否
     const foreign = await signup({ ...base, username: 'other', signupCode: CODE }, 'https://evil.example.com');

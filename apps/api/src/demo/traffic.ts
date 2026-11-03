@@ -90,7 +90,7 @@ export class DemoTraffic {
       action: 'opened',
       title,
       body,
-      labels: withLabel ? ['ai:ready', 'enhancement'] : ['question'],
+      labels: withLabel ? ['agents-office', 'enhancement'] : ['question'],
       senderLogin: username,
     });
     void this.s.dispatcher.drain();

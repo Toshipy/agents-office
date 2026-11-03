@@ -40,7 +40,7 @@ export function TaskComposer({ projectId, compact, placeholder }: { projectId?: 
 
   const disabledReason = !project ? 'Project がありません' : !project.repo ? 'Repo 未接続の Project には依頼できません' : null;
   const runtimeHint = project?.repo?.claudeReady
-    ? 'Claude がローカルリポジトリの専用ブランチで作業します（計画 → 実装 → テスト → レビュー → Draft PR）。マージは人が行います。'
+    ? 'Claude がローカルリポジトリの専用ブランチで作業します（計画 → 実装 → テスト → レビュー → 人の承認 → PR）。マージは人が行います。'
     : 'この Project はシミュレーションで実行されます。Projects でローカルリポジトリを設定すると Claude が作業します。';
 
   return (

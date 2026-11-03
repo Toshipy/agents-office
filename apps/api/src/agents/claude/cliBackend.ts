@@ -21,7 +21,7 @@ import { z } from 'zod';
 import type { StepExecutionContext } from '../runner';
 import { RunnerError, UsageLimitError } from '../runner';
 import { CLAUDE_CODE_DENY_RULES, safeEnv } from './git';
-import type { DevelopRequest, ModelBackend, StructuredRequest } from './shared';
+import { STRUCTURED_LABEL, type DevelopRequest, type ModelBackend, type StructuredRequest } from './shared';
 
 export interface ClaudeCodeBackendOptions {
   /** `claude` コマンドのパス（既定: PATH 上の claude） */
@@ -90,7 +90,7 @@ interface CliResultMessage {
 }
 
 interface Invocation {
-  purpose: 'plan' | 'review' | 'develop';
+  purpose: 'plan' | 'review' | 'materials' | 'develop';
   worktree: string;
   system: string;
   stdin: string;
@@ -166,12 +166,13 @@ export class ClaudeCodeBackend implements ModelBackend {
       stdin: req.user,
       tools: read.allowed ? ['Read', 'Grep', 'Glob'] : [],
       permissionMode: 'dontAsk',
-      maxTurns: req.purpose === 'plan' ? this.opts.maxTurns.plan : this.opts.maxTurns.review,
+      // 資料は Planner が書くので、計画と同じターン上限にする
+      maxTurns: req.purpose === 'review' ? this.opts.maxTurns.review : this.opts.maxTurns.plan,
       jsonSchema: cliJsonSchema(req.schema),
     });
     const parsed = req.schema.safeParse(result.structured_output);
     if (!parsed.success) {
-      throw new RunnerError(`${req.purpose === 'plan' ? '計画' : 'レビュー'}の構造化出力がスキーマに合いません`, 'CLAUDE_BAD_OUTPUT', true);
+      throw new RunnerError(`${STRUCTURED_LABEL[req.purpose]}の構造化出力がスキーマに合いません`, 'CLAUDE_BAD_OUTPUT', true);
     }
     return { output: parsed.data, model };
   }

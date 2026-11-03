@@ -24,6 +24,8 @@ export interface StepExecutionContext {
   /** 依頼本文（Issue 本文を含む）。非信頼入力として扱う */
   request: string;
   guidance: string | null;
+  /** 画面で任せたときの追加指示（信頼できる指示）。guidance と違い、危険操作・要件確認の停止を外さない */
+  extraInstruction: string | null;
   repo: string | null;
   branch: string;
   fixLoops: number;
@@ -33,11 +35,13 @@ export interface StepExecutionContext {
   /** この Run の実行基盤（Run 作成時に確定） */
   runtime: AgentRuntime;
   /** Project に設定されたローカル git リポジトリ（Claude 実行時に使用。GitHub 連携時はサーバー上の管理クローン） */
-  localRepo: { path: string; testCommand: string | null } | null;
-  /** GitHub App で接続したリポジトリ（push と Draft PR 作成に使う）。ローカル / シミュレーターの Repo は null */
+  localRepo: { path: string; testCommand: string | null; testImage: string | null } | null;
+  /** GitHub App で接続したリポジトリ（push と PR 作成に使う）。ローカル / シミュレーターの Repo は null */
   remote: RemoteRepo | null;
   /** GitHub Issue から起動した Run の Issue 番号 */
   issueNumber: number | null;
+  /** 着手時の Issue コメントから決めた振り分け。'implement' なら計画が materials を選んでも実装に進む */
+  modeFromComments: 'implement' | null;
   signal: AbortSignal;
   log(message: string, kind?: 'log' | 'error'): Promise<void>;
   /** Tool Broker を通したツール呼び出し。拒否されても例外は投げず結果を返す */
@@ -95,5 +99,30 @@ export class UsageLimitError extends RunnerError {
     readonly resetsAt: string | null,
   ) {
     super(message, 'CLAUDE_USAGE_LIMIT', false);
+  }
+}
+
+/** publish 承認で人に見せる PR の中身（AI レビューが通った時点の worktree から作る） */
+export interface PublishPreview {
+  headSha: string;
+  /** base からの差分（patch）の SHA-256（16 進） */
+  diffSha256: string;
+  title: string;
+  body: string;
+}
+
+/** publish 承認で人に見せる資料コメント（資料モード） */
+export interface MaterialsPreview {
+  /** Issue にそのまま投稿する本文（1 行目の印と、Run の ID の隠し行を含む） */
+  comment: string;
+}
+
+/**
+ * PR の工程で、worktree の HEAD が人の承認した headSha と違った。承認していない内容は push しない。
+ * エンジンは Run を失敗にせず、今の HEAD でテスト → AI レビューからやり直し、通れば publish 承認を作り直す。
+ */
+export class PublishStaleError extends RunnerError {
+  constructor(message: string) {
+    super(message, 'PUBLISH_STALE', false);
   }
 }

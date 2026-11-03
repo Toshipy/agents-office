@@ -5,12 +5,12 @@
  */
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { APPROVAL_TYPE_LABEL, ROLE_LABEL, STEP_KEY_LABEL, type AgentRole, type StepKey } from '@paw/contracts';
-import { ApiError, api, newIdempotencyKey, type ApprovalDto } from '../../shared/api/client';
+import { ApiError, api, newIdempotencyKey, type ApprovalDto, type RunDetail } from '../../shared/api/client';
 import { useAuthConfig } from '../../shared/api/authConfig';
 import { Icon } from '../../shared/ui/Icon';
-import { Modal } from '../../shared/ui/content';
+import { ArtifactBody, Modal } from '../../shared/ui/content';
 import { RunStatusPill } from '../../shared/ui/status';
 import { relTime, untilTime } from '../../shared/ui/format';
 import { toast } from '../../shared/ui/toast';
@@ -26,6 +26,94 @@ const ACTION_TEXT: Record<string, { label: string; tone: string; icon: string; c
   approved: { label: 'GitHub で Approve', tone: 'primary', icon: 'check', confirm: 'GitHub のレビュー（Approve）をシミュレートします。マージは行われません。' },
   changes_requested: { label: 'GitHub で Request changes', tone: '', icon: 'refresh', confirm: 'GitHub のレビュー（Request changes）をシミュレートします。再修正 Run が始まります。' },
 };
+
+/** publish 承認の本体。kind で PR の内容か、Issue に書く資料コメントかを出し分ける */
+function PublishBody({ approval: a }: { approval: ApprovalDto }) {
+  const p = a.payload;
+  const [diffOpen, setDiffOpen] = useState(false);
+  const isPr = p.kind === 'pull_request';
+  // 差分は承認の payload が指す成果物（承認する差分と同じ中身）だけを開く。テスト結果は Run の成果物から探す
+  const run = useQuery({ queryKey: ['run', a.runId], queryFn: () => api.get<RunDetail>(`/v1/runs/${a.runId}`), enabled: isPr });
+  const arts = run.data?.artifacts ?? [];
+  const diffId = typeof p.diffArtifactId === 'string' ? p.diffArtifactId : null;
+  const diffTitle = arts.find((x) => x.id === diffId)?.title ?? '差分';
+  const test = [...arts].reverse().find((x) => x.kind === 'test_report');
+  const remove: string[] = p.labels?.remove ?? [];
+  const add: string[] = p.labels?.add ?? [];
+  const labelOps = (
+    <>
+      {remove.map((l) => (
+        <li key={`r-${l}`}>
+          ラベル <span className="mono">{l}</span> を外す
+        </li>
+      ))}
+      {add.map((l) => (
+        <li key={`a-${l}`}>
+          ラベル <span className="mono">{l}</span> を付ける
+        </li>
+      ))}
+      {p.unassign === true ? <li>自分のアサインを外す</li> : null}
+    </>
+  );
+  const hasOps = remove.length + add.length > 0 || p.unassign === true;
+
+  if (isPr) {
+    return (
+      <>
+        <p className="hint">{p.update ? '承認すると、既存の PR のブランチに push して PR の内容を更新します。' : '承認すると、ブランチを push して PR（通常の PR）を作ります。'}</p>
+        <dl className="kv">
+          <div>
+            <dt>PR タイトル</dt>
+            <dd>{String(p.title ?? '')}</dd>
+          </div>
+          <div>
+            <dt>PR 本文</dt>
+            <dd>
+              <pre className="json pub-body">{String(p.body ?? '')}</pre>
+            </dd>
+          </div>
+          <div>
+            <dt>差分</dt>
+            <dd>
+              {diffId ? (
+                <button className="btn ghost small" onClick={() => setDiffOpen(true)}>
+                  {diffTitle} を開く
+                </button>
+              ) : (
+                <span className="hint warn">承認する差分と一致する成果物がありません（ハッシュで確かめてください）</span>
+              )}
+              <span className="mono faint small"> {String(p.diffSha256 ?? '').slice(0, 19)}…</span>
+            </dd>
+          </div>
+          <div>
+            <dt>テスト結果</dt>
+            <dd>{test ? test.title : '—'}</dd>
+          </div>
+          {hasOps ? (
+            <div>
+              <dt>ラベル操作</dt>
+              <dd>
+                <ul>{labelOps}</ul>
+              </dd>
+            </div>
+          ) : null}
+        </dl>
+        {diffOpen && diffId ? (
+          <Modal title={diffTitle} onClose={() => setDiffOpen(false)} wide>
+            <ArtifactBody artifactId={diffId} />
+          </Modal>
+        ) : null}
+      </>
+    );
+  }
+  return (
+    <>
+      <p className="hint">承認すると、次のコメントを Issue に書き、ラベルを付け替えます。</p>
+      <pre className="json pub-body">{String(p.comment ?? '')}</pre>
+      {hasOps ? <ul>{labelOps}</ul> : null}
+    </>
+  );
+}
 
 export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
   const qc = useQueryClient();
@@ -74,7 +162,7 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
     <article className={`approval-card type-${a.actionType}${pending ? '' : ' decided'}`}>
       <header className="ap-head">
         <span className="ap-type">
-          <Icon name={a.actionType === 'pr_review' ? 'git-pr' : a.actionType === 'dangerous_operation' ? 'alert' : 'help'} size={15} />
+          <Icon name={a.actionType === 'pr_review' || a.actionType === 'publish' ? 'git-pr' : a.actionType === 'dangerous_operation' ? 'alert' : 'help'} size={15} />
           {APPROVAL_TYPE_LABEL[a.actionType]}
         </span>
         {a.project ? (
@@ -95,11 +183,13 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
       ) : null}
 
       <div className="ap-body">
-        {a.actionType === 'pr_review' ? (
+        {a.actionType === 'publish' ? (
+          <PublishBody approval={a} />
+        ) : a.actionType === 'pr_review' ? (
           <>
             <dl className="kv cols">
               <div>
-                <dt>Draft PR</dt>
+                <dt>PR</dt>
                 <dd className="mono">
                   {typeof p.pr?.url === 'string' && p.pr.url.startsWith('https://') ? (
                     <a href={p.pr.url} target="_blank" rel="noreferrer">
@@ -203,11 +293,12 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
                 title={a.actionType === 'dangerous_operation' ? 'MVP では危険操作は承認しても実行できません' : undefined}
                 onClick={() => setAction({ kind: 'decision', decision: 'approve' })}
               >
-                <Icon name={a.actionType === 'dangerous_operation' ? 'lock' : 'check'} size={14} /> {usageLimit ? '続行（止まった工程から再開）' : '承認して続行'}
+                <Icon name={a.actionType === 'dangerous_operation' ? 'lock' : 'check'} size={14} />{' '}
+                {usageLimit ? '続行（止まった工程から再開）' : a.actionType === 'publish' ? '承認して GitHub に書き込む' : '承認して続行'}
               </button>
               <button className="btn" onClick={() => setAction({ kind: 'decision', decision: 'request_changes' })}>
                 <Icon name="refresh" size={14} />{' '}
-                {a.actionType === 'dangerous_operation' ? '安全な範囲で再計画' : usageLimit ? '差し戻し（計画からやり直す）' : '差し戻し（指示を追加）'}
+                {a.actionType === 'dangerous_operation' ? '安全な範囲で再計画' : usageLimit ? '差し戻し（計画からやり直す）' : a.actionType === 'publish' ? '差し戻し（修正を指示）' : '差し戻し（指示を追加）'}
               </button>
               <button className="btn danger" onClick={() => setAction({ kind: 'decision', decision: 'reject' })}>
                 <Icon name="x" size={14} /> 却下
@@ -228,7 +319,9 @@ export function ApprovalCard({ approval: a }: { approval: ApprovalDto }) {
             <p>
               {usageLimit && key === 'approve'
                 ? `止まった工程から再開します。${beforeReset ? 'まだ利用上限のリセット前のため、再び一時停止する可能性があります。' : ''}`
-                : ACTION_TEXT[key].confirm}
+                : a.actionType === 'publish' && key === 'approve'
+                  ? '承認すると、表示した内容がそのまま GitHub に書き込まれます。'
+                  : ACTION_TEXT[key].confirm}
             </p>
             <dl className="kv">
               <div>

@@ -139,7 +139,7 @@ export function RunDetailPage() {
               <dd className="mono">{run.branch}</dd>
             </div>
             <div>
-              <dt>Draft PR</dt>
+              <dt>PR</dt>
               <dd className="mono">
                 {run.pr ? (
                   run.pr.url.startsWith('https://') ? (
@@ -164,7 +164,7 @@ export function RunDetailPage() {
           {run.pr ? (
             <p className="hint">
               {run.pr.url.startsWith('https://')
-                ? 'GitHub の Draft PR でレビューしてください。Approve で完了、Request changes で同じ PR を修正します。マージは人が行います（AI はマージできません）。'
+                ? 'GitHub の PR でレビューしてください。Approve で完了、Request changes で同じ PR を修正します。マージは人が行います（AI はマージできません）。'
                 : isClaudeRuntime(run.runtime)
                 ? `ローカルリポジトリ（${d.repository?.localPath ?? ''}）のブランチ ${run.branch} に変更があります。確認してから人がマージしてください（AI はマージできません）。`
                 : 'PR はローカル GitHub シミュレーター上の Draft です。マージは人が行います（AI はマージできません）。'}

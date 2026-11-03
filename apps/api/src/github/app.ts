@@ -42,6 +42,64 @@ export interface GithubPullRequest {
   draft: boolean;
 }
 
+export interface GithubIssue {
+  number: number;
+  title: string;
+  body: string;
+  htmlUrl: string;
+  labels: string[];
+  assignees: string[];
+  updatedAt: string;
+  /** getIssue だけが埋める。PR 番号を Issue として扱わないために使う */
+  isPullRequest?: boolean;
+  state?: 'open' | 'closed';
+}
+
+export interface GithubComment {
+  id: number;
+  body: string;
+  user: string;
+  userType: 'User' | 'Bot';
+  createdAt: string;
+}
+
+export interface GithubReview {
+  id: number;
+  state: string;
+  body: string;
+  user: string;
+  commitId: string;
+}
+
+interface RawIssue {
+  number: number;
+  title: string;
+  body?: string | null;
+  html_url: string;
+  labels?: (string | { name?: string })[];
+  assignees?: { login: string }[];
+  updated_at: string;
+  pull_request?: unknown;
+  state?: string;
+}
+
+const toIssue = (i: RawIssue): GithubIssue => ({
+  number: i.number,
+  title: i.title,
+  body: i.body ?? '',
+  htmlUrl: i.html_url,
+  labels: (i.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? ''))).filter(Boolean),
+  assignees: (i.assignees ?? []).map((a) => a.login),
+  updatedAt: i.updated_at,
+});
+
+const toPull = (r: { number: number; html_url: string; draft?: boolean; head: { sha: string } }): GithubPullRequest => ({
+  number: r.number,
+  htmlUrl: r.html_url,
+  headSha: r.head.sha,
+  draft: r.draft === true,
+});
+
 const b64url = (b: Buffer | string) => Buffer.from(b).toString('base64url');
 
 export class GithubApp {
@@ -137,19 +195,119 @@ export class GithubApp {
     return out;
   }
 
-  async createDraftPullRequest(
+  /** 一覧 API を per_page=100 で、空の配列が返るまでページを進めて集める */
+  private async paginate<T>(path: string, installationId: number): Promise<T[]> {
+    const sep = path.includes('?') ? '&' : '?';
+    const out: T[] = [];
+    for (let page = 1; ; page++) {
+      const items = await this.request<T[]>('GET', `${path}${sep}per_page=100&page=${page}`, { installationId });
+      if (!Array.isArray(items) || items.length === 0) return out;
+      out.push(...items);
+    }
+  }
+
+  private repoPath(fullName: string): string {
+    const [owner, repo] = fullName.split('/');
+    return `/repos/${enc(owner)}/${enc(repo)}`;
+  }
+
+  /** Issues API は PR も返すので、pull_request を持つものは除く */
+  async listOpenIssues(installationId: number, fullName: string): Promise<GithubIssue[]> {
+    const raw = await this.paginate<RawIssue>(`${this.repoPath(fullName)}/issues?state=open`, installationId);
+    return raw.filter((i) => !i.pull_request).map(toIssue);
+  }
+
+  async listIssuesWithLabel(installationId: number, fullName: string, label: string): Promise<GithubIssue[]> {
+    const raw = await this.paginate<RawIssue>(`${this.repoPath(fullName)}/issues?state=open&labels=${enc(label)}`, installationId);
+    return raw.filter((i) => !i.pull_request).map(toIssue);
+  }
+
+  async getIssue(installationId: number, fullName: string, number: number): Promise<GithubIssue> {
+    const raw = await this.request<RawIssue>('GET', `${this.repoPath(fullName)}/issues/${number}`, { installationId });
+    return { ...toIssue(raw), isPullRequest: Boolean(raw.pull_request), state: raw.state === 'closed' ? 'closed' : 'open' };
+  }
+
+  async listIssueComments(installationId: number, fullName: string, number: number): Promise<GithubComment[]> {
+    const raw = await this.paginate<{ id: number; body?: string | null; user?: { login: string; type?: string } | null; created_at: string }>(
+      `${this.repoPath(fullName)}/issues/${number}/comments`,
+      installationId,
+    );
+    return raw.map((c) => ({ id: c.id, body: c.body ?? '', user: c.user?.login ?? '', userType: c.user?.type === 'Bot' ? 'Bot' : 'User', createdAt: c.created_at }));
+  }
+
+  /** そのラベルを最後に付けた人と時刻（events API の最新の labeled）。無ければ null */
+  async lastLabeled(installationId: number, fullName: string, number: number, label: string): Promise<{ login: string; at: string } | null> {
+    const events = await this.paginate<{ event: string; label?: { name?: string }; actor?: { login?: string } | null; created_at: string }>(
+      `${this.repoPath(fullName)}/issues/${number}/events`,
+      installationId,
+    );
+    let last: { login: string; at: string } | null = null;
+    for (const e of events) {
+      if (e.event !== 'labeled' || e.label?.name !== label || !e.actor?.login) continue;
+      // 返却順に依らず、created_at が最も新しいものを採る
+      if (!last || Date.parse(e.created_at) >= Date.parse(last.at)) last = { login: e.actor.login, at: e.created_at };
+    }
+    return last;
+  }
+
+  async addLabels(installationId: number, fullName: string, number: number, labels: string[]): Promise<void> {
+    await this.request('POST', `${this.repoPath(fullName)}/issues/${number}/labels`, { installationId }, { labels });
+  }
+
+  /** 既に無いラベル（404）は成功とみなす */
+  async removeLabel(installationId: number, fullName: string, number: number, label: string): Promise<void> {
+    try {
+      await this.request('DELETE', `${this.repoPath(fullName)}/issues/${number}/labels/${enc(label)}`, { installationId });
+    } catch (e) {
+      if (e instanceof GithubApiError && e.status === 404) return;
+      throw e;
+    }
+  }
+
+  async addAssignees(installationId: number, fullName: string, number: number, logins: string[]): Promise<void> {
+    await this.request('POST', `${this.repoPath(fullName)}/issues/${number}/assignees`, { installationId }, { assignees: logins });
+  }
+
+  async removeAssignees(installationId: number, fullName: string, number: number, logins: string[]): Promise<void> {
+    await this.request('DELETE', `${this.repoPath(fullName)}/issues/${number}/assignees`, { installationId }, { assignees: logins });
+  }
+
+  /** head は同じリポジトリのブランチ（`<owner>:<branch>`）で絞る */
+  async findOpenPullByHead(installationId: number, fullName: string, branch: string): Promise<GithubPullRequest | null> {
+    const [owner] = fullName.split('/');
+    const list = await this.request<{ number: number; html_url: string; draft?: boolean; head: { sha: string } }[]>(
+      'GET',
+      `${this.repoPath(fullName)}/pulls?state=open&head=${enc(`${owner}:${branch}`)}`,
+      { installationId },
+    );
+    return list.length > 0 ? toPull(list[0]) : null;
+  }
+
+  async createPullRequest(
     installationId: number,
     fullName: string,
     pr: { title: string; head: string; base: string; body: string },
   ): Promise<GithubPullRequest> {
-    const [owner, repo] = fullName.split('/');
     const r = await this.request<{ number: number; html_url: string; draft?: boolean; head: { sha: string } }>(
       'POST',
-      `/repos/${enc(owner)}/${enc(repo)}/pulls`,
+      `${this.repoPath(fullName)}/pulls`,
       { installationId },
-      { ...pr, draft: true, maintainer_can_modify: false },
+      { ...pr, draft: false, maintainer_can_modify: false },
     );
-    return { number: r.number, htmlUrl: r.html_url, headSha: r.head.sha, draft: r.draft !== false };
+    return toPull(r);
+  }
+
+  async getPull(installationId: number, fullName: string, number: number): Promise<{ state: 'open' | 'closed'; merged: boolean; headSha: string }> {
+    const r = await this.request<{ state: string; merged?: boolean; head: { sha: string } }>('GET', `${this.repoPath(fullName)}/pulls/${number}`, { installationId });
+    return { state: r.state === 'open' ? 'open' : 'closed', merged: r.merged === true, headSha: r.head.sha };
+  }
+
+  async listReviews(installationId: number, fullName: string, number: number): Promise<GithubReview[]> {
+    const raw = await this.paginate<{ id: number; state: string; body?: string | null; user?: { login: string } | null; commit_id: string }>(
+      `${this.repoPath(fullName)}/pulls/${number}/reviews`,
+      installationId,
+    );
+    return raw.map((r) => ({ id: r.id, state: r.state, body: r.body ?? '', user: r.user?.login ?? '', commitId: r.commit_id }));
   }
 
   async commentOnIssue(installationId: number, fullName: string, issueNumber: number, body: string) {

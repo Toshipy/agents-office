@@ -63,7 +63,9 @@ export function registerWorkspaceRoutes(app: Hono<AppEnv>, s: Services) {
         .select({ id: runs.id })
         .from(runs)
         .where(and(eq(runs.workspaceId, a.workspaceId), inArray(runs.status, ['queued', ...ACTIVE_RUN_STATUSES.filter((x) => x !== 'approved')])));
-      for (const t of targets) if (await s.engine.cancelRun(t.id, 'キルスイッチによる一括停止')) cancelled++;
+      // cancelRun は CLI の終了を待つため、順番に待つと最後の Run がいつまでも動く。全 Run を同時に止める
+      const results = await Promise.all(targets.map((t) => s.engine.cancelRun(t.id, 'キルスイッチによる一括停止')));
+      cancelled = results.filter(Boolean).length;
     }
     await audit(s.db, {
       workspaceId: a.workspaceId,

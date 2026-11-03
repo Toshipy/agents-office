@@ -1,6 +1,6 @@
 /**
  * ローカル用シミュレーション Runner。
- * 外部 LLM / GitHub に接続せず、計画→実装→テスト→レビュー→Draft PR の流れと
+ * 外部 LLM / GitHub に接続せず、計画→実装→テスト→レビュー→PR の流れと
  * ツール呼び出し・ポリシー判定・成果物・利用量を再現する。
  *
  * テスト・デモ用マーカー（依頼本文に含めると挙動を固定できる）:
@@ -20,7 +20,7 @@ import {
   type ContentContext,
   type DiffResult,
 } from './content';
-import { RunnerCrashError, type AgentRunner, type StepExecutionContext, type StepOutput } from './runner';
+import { RunnerCrashError, RunnerError, type AgentRunner, type StepExecutionContext, type StepOutput } from './runner';
 import { sha256Hex } from '../lib/crypto';
 
 export const SIM_MODEL = 'simulated-local';
@@ -77,6 +77,10 @@ export class SimulatedRunner implements AgentRunner {
       case 'update_pr':
         out = await this.pullRequest(ctx, rand);
         break;
+      case 'materials':
+      case 'post_materials':
+        // 資料モードは GitHub App で接続した Repo の Issue だけ（シミュレーターは常に実装として進む）
+        throw new RunnerError('シミュレーターでは資料の工程を実行しません', 'NOT_SUPPORTED', false);
     }
     const expensive = PATTERNS.simExpensive.test(ctx.request);
     const scale = expensive ? 400 : 1;
@@ -242,7 +246,7 @@ export class SimulatedRunner implements AgentRunner {
     await ctx.artifact('review', 'AI レビュー', 'review.md', 'text/markdown', md);
     return {
       status: 'succeeded',
-      summary: blockers.length ? `blocker ${blockers.length} 件（差し戻し）` : 'Draft PR 提出可（人間の承認ではない）',
+      summary: blockers.length ? `blocker ${blockers.length} 件（差し戻し）` : 'PR 提出可（人間の承認ではない）',
       outcome: { approved: blockers.length === 0, blockers },
     };
   }
@@ -258,11 +262,11 @@ export class SimulatedRunner implements AgentRunner {
       return { status: 'failed', summary: `push がポリシーで拒否: ${push.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
     }
     await ctx.sleep(work(rand, 900, 200));
-    const tool = update ? 'github.pull_request.update' : 'github.pull_request.create_draft';
+    const tool = update ? 'github.pull_request.update' : 'github.pull_request.create';
     const res = await ctx.tool(
       tool,
-      { repo: ctx.repo, branch: ctx.branch, base: 'main', draft: true },
-      update ? `Draft PR #${ctx.pr!.number} を更新` : 'Draft PR を作成（base: main）',
+      { repo: ctx.repo, branch: ctx.branch, base: 'main', draft: false },
+      update ? `PR #${ctx.pr!.number} を更新` : 'PR を作成（base: main）',
     );
     if (!res.allowed) {
       return { status: 'failed', summary: `PR 操作がポリシーで拒否: ${res.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
@@ -280,11 +284,11 @@ export class SimulatedRunner implements AgentRunner {
     const testsPassed = (ctx.previous.testsPassed as boolean | undefined) ?? true;
     await ctx.artifact(
       'draft_pr',
-      `Draft PR #${number}${update ? '（更新）' : ''}`,
+      `PR #${number}${update ? '（更新）' : ''}`,
       'draft-pr.md',
       'text/markdown',
       draftPrMarkdown(contentCtx(ctx), pr, testsPassed, update),
     );
-    return { status: 'succeeded', summary: `Draft PR #${number} ${update ? '更新' : '作成'}`, outcome: { pr } };
+    return { status: 'succeeded', summary: `PR #${number} ${update ? '更新' : '作成'}`, outcome: { pr } };
   }
 }

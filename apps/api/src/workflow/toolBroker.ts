@@ -25,7 +25,9 @@ export const DEFAULT_TOOL_POLICIES: Record<Exclude<StepRole, 'tool_broker'>, str
 };
 
 /** Tool Broker 自身がシステムとして実行できる GitHub 書き込み（ポリシー検証付き） */
-const BROKER_TOOLS = ['github.branch.push', 'github.pull_request.create_draft', 'github.pull_request.update'];
+const BROKER_TOOLS = ['github.branch.push', 'github.pull_request.create', 'github.pull_request.update'];
+/** Tool Broker が資料モードで行う Issue への書き込み（コメント・ラベル・自分のアサインの取り外し）。ブランチは触らない */
+const BROKER_ISSUE_TOOLS = ['github.issue.comment', 'github.issue.labels', 'github.issue.unassign_self'];
 
 export interface ToolRequest {
   role: StepRole;
@@ -47,19 +49,22 @@ export function authorizeTool(req: ToolRequest): ToolDecision {
     return { allowed: false, reason: `「${req.tool}」はポリシーで常に禁止されています（人間の操作のみ）` };
   }
   if (req.role === 'tool_broker') {
-    if (!BROKER_TOOLS.includes(req.tool)) {
+    const issueTool = BROKER_ISSUE_TOOLS.includes(req.tool);
+    if (!BROKER_TOOLS.includes(req.tool) && !issueTool) {
       return { allowed: false, reason: `Tool Broker に許可されていない操作: ${req.tool}` };
     }
     if (!req.boundRepo) return { allowed: false, reason: 'Repo が接続されていません' };
     if (req.args.repo !== req.boundRepo) {
       return { allowed: false, reason: `接続済み Repo（${req.boundRepo}）以外への書き込みは禁止` };
     }
+    if (issueTool) {
+      const issue = req.args.issue;
+      if (typeof issue !== 'number' || !Number.isInteger(issue) || issue <= 0) return { allowed: false, reason: 'Issue 番号がありません' };
+      return { allowed: true, reason: 'ポリシー適合' };
+    }
     const branch = String(req.args.branch ?? '');
     if (!/^ai\/[A-Za-z0-9._/-]+$/.test(branch)) {
       return { allowed: false, reason: 'AI 用ブランチ（ai/ プレフィックス）以外への書き込みは禁止' };
-    }
-    if (req.tool !== 'github.branch.push' && req.args.draft !== true) {
-      return { allowed: false, reason: 'PR は Draft でのみ作成・更新できます' };
     }
     return { allowed: true, reason: 'ポリシー適合' };
   }

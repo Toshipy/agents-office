@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentRuntime } from '@paw/contracts';
+import { log } from './lib/logger';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(here, '../../..');
@@ -41,8 +42,20 @@ export interface AppConfig {
   claudeStepTimeoutMs: number;
   worktreesDir: string;
   testTimeoutMs: number;
+  /** Tester の実行場所。docker = 使い捨てコンテナ（サーバーモードの既定）/ host = ホストで直接（ローカルの既定） */
+  testSandbox: 'docker' | 'host';
+  /** Repo 別のイメージ指定が無いときに使うイメージ。コンテナは非 root・HOME=/tmp のため、pnpm は testCommand に `corepack pnpm test` のように書く（`corepack enable` は使えない） */
+  testImage: string;
+  /** Tester のコンテナを繋ぐ docker ネットワーク */
+  testNetwork: string;
   /** GitHub App 連携（未設定ならローカルの GitHub シミュレーターのみ） */
   githubApp: { appId: string; privateKeyPem: string; apiUrl: string; allowedUsers: string[] } | null;
+  /** GitHub のポーリング間隔（ミリ秒。PAW_GITHUB_POLL_MS、既定 60 秒） */
+  githubPollMs: number;
+  /** ポーリングで Issue を拾うときの自分の GitHub ログイン名（PAW_GITHUB_LOGIN、無ければ許可ユーザーの先頭、無ければ null） */
+  githubLogin: string | null;
+  /** 受信 Webhook を有効にする（PAW_GITHUB_WEBHOOK=1）。既定は無効 = サーバーをインターネットに出さなくてよい */
+  githubWebhookEnabled: boolean;
   /** サーバーで公開する URL（例 https://paw.example.com）。Cookie の Secure・許可 Origin に使う */
   publicUrl: string | null;
   cookieSecure: boolean;
@@ -64,20 +77,35 @@ function loadGithubApp(): AppConfig['githubApp'] {
   if (!appId) throw new Error('PAW_GITHUB_APP_ID が未設定です（GitHub App の秘密鍵だけが設定されています）');
   const pem = keyFile ? readFileSync(keyFile, 'utf8') : (inlineKey ?? '').replace(/\\n/g, '\n');
   if (!pem.includes('PRIVATE KEY')) throw new Error('GitHub App の秘密鍵（PEM）を読み込めません: PAW_GITHUB_APP_PRIVATE_KEY_FILE を確認してください');
-  // 実 GitHub の Webhook は、App に設定した secret と同じ値でしか検証できない（自動生成の値では受け付けられない）
-  if (!nonEmpty(process.env.PAW_GITHUB_WEBHOOK_SECRET) || process.env.PAW_GITHUB_WEBHOOK_SECRET!.trim().length < 16) {
-    throw new Error('GitHub App を使う場合は PAW_GITHUB_WEBHOOK_SECRET（16 文字以上。App の Webhook secret と同じ値）を設定してください');
+  // Webhook を受ける場合だけ、App に設定した secret と同じ値が要る（自動生成の値では実 GitHub の署名を検証できない）。ポーリング運用では不要
+  if (process.env.PAW_GITHUB_WEBHOOK === '1' && (!nonEmpty(process.env.PAW_GITHUB_WEBHOOK_SECRET) || process.env.PAW_GITHUB_WEBHOOK_SECRET!.trim().length < 16)) {
+    throw new Error('PAW_GITHUB_WEBHOOK=1 の場合は PAW_GITHUB_WEBHOOK_SECRET（16 文字以上。App の Webhook secret と同じ値）を設定してください');
   }
-  const allowedUsers = (process.env.PAW_GITHUB_ALLOWED_USERS ?? '')
+  const listed = (process.env.PAW_GITHUB_ALLOWED_USERS ?? '')
     .split(',')
     .map((u) => u.trim().toLowerCase())
     .filter(Boolean);
+  // 未設定なら自分（PAW_GITHUB_LOGIN）だけを許す。自分が付けたラベル・レビューで動くようにするため
+  const login = nonEmpty(process.env.PAW_GITHUB_LOGIN)?.toLowerCase();
+  const allowedUsers = listed.length === 0 && login ? [login] : listed;
   return { appId, privateKeyPem: pem, apiUrl: process.env.PAW_GITHUB_API_URL?.trim() || 'https://api.github.com', allowedUsers };
+}
+
+function parsePollMs(v: string | undefined): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 10_000 ? Math.floor(n) : 60_000;
 }
 
 function parseSignup(v: string | undefined): AppConfig['signup'] {
   const m = (v ?? 'open').trim().toLowerCase().replace('-', '_');
   return m === 'first_user' || m === 'closed' ? m : 'open';
+}
+
+/** 未指定ならサーバーモード（publicUrl あり）は docker、ローカルは host */
+function parseTestSandbox(v: string | undefined, publicUrl: string | null): AppConfig['testSandbox'] {
+  const m = (v ?? '').trim().toLowerCase();
+  if (m === 'docker' || m === 'host') return m;
+  return publicUrl ? 'docker' : 'host';
 }
 
 export interface ClaudeCodeConfig {
@@ -92,7 +120,7 @@ export interface ClaudeCodeConfig {
   allowApiBilling: boolean;
   maxTurns: { plan: number; review: number; develop: number };
   /** 起動時の検出結果（バージョン・ログイン方法）。未検出なら null */
-  detected: { version: string | null; loggedIn: boolean; authMethod: string | null; subscription: boolean; problem: string | null } | null;
+  detected: { version: string | null; loggedIn: boolean; authMethod: string | null; subscription: boolean; problem: string | null; supportsRestricted: boolean } | null;
 }
 
 export function parseRuntimeMode(v: string | undefined): 'auto' | AgentRuntime {
@@ -191,6 +219,10 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const mode = parseRuntimeMode(process.env.PAW_AGENT_RUNTIME);
   const runtime = provisionalRuntime(mode);
   const effort = (process.env.PAW_CLAUDE_EFFORT ?? 'high') as AppConfig['claudeEffort'];
+  const githubApp = isMemory ? null : loadGithubApp();
+  if (githubApp && !nonEmpty(process.env.PAW_GITHUB_LOGIN) && githubApp.allowedUsers.length === 0) {
+    log.warn('PAW_GITHUB_LOGIN も PAW_GITHUB_ALLOWED_USERS も未設定のため、GitHub のポーリングでは Run を作りません');
+  }
   return {
     dataDir: isMemory ? 'memory' : resolve(root, 'pglite'),
     dataRoot: root,
@@ -226,7 +258,13 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     claudeStepTimeoutMs: positiveInt(process.env.PAW_CLAUDE_STEP_TIMEOUT_MS, 30 * 60_000),
     worktreesDir: resolve(root, 'worktrees'),
     testTimeoutMs: Number(process.env.PAW_TEST_TIMEOUT_MS ?? 600_000),
-    githubApp: isMemory ? null : loadGithubApp(),
+    testSandbox: parseTestSandbox(process.env.PAW_TEST_SANDBOX, publicUrl),
+    testImage: nonEmpty(process.env.PAW_TEST_IMAGE) ?? 'node:22-bookworm',
+    testNetwork: nonEmpty(process.env.PAW_TEST_NETWORK) ?? 'paw-test',
+    githubApp,
+    githubPollMs: parsePollMs(process.env.PAW_GITHUB_POLL_MS),
+    githubLogin: nonEmpty(process.env.PAW_GITHUB_LOGIN) ?? githubApp?.allowedUsers[0] ?? null,
+    githubWebhookEnabled: process.env.PAW_GITHUB_WEBHOOK === '1',
     publicUrl,
     cookieSecure: publicUrl?.startsWith('https://') ?? false,
     signup: parseSignup(process.env.PAW_SIGNUP),

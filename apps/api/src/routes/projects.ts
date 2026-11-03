@@ -18,6 +18,7 @@ import { audit } from '../services/audit';
 import { simulatedInstallationId, simulatedRepositoryId } from '../github/simulator';
 import { verifyRepository } from '../agents/claude/git';
 import { GithubApiError } from '../github/app';
+import { AGENTS_OFFICE_LABEL } from '../github/labels';
 import { resolve } from 'node:path';
 import { auth, ownedProject, parseBody } from './helpers';
 
@@ -231,7 +232,7 @@ export function registerProjectRoutes(app: Hono<AppEnv>, s: Services) {
         projectId: project.id,
         ...values,
         automationEnabled: false, // FR-022: 接続直後は OFF
-        policy: { triggerLabel: 'ai:ready', events: ['issues.opened', 'issues.labeled'], maxRevisionAttempts: 3 },
+        policy: { triggerLabel: 'agents-office', events: ['issues.opened', 'issues.labeled'], maxRevisionAttempts: 3 },
       })
       .returning();
     await audit(s.db, { workspaceId: a.workspaceId, actorUserId: a.userId, action: 'repository.connected', targetType: 'project', targetId: project.id, detail: { fullName: b.fullName, verification: b.verification } });
@@ -297,6 +298,11 @@ export function registerProjectRoutes(app: Hono<AppEnv>, s: Services) {
     const a = auth(c);
     const project = await ownedProject(s, a.workspaceId, c.req.param('id'));
     const body = await parseBody(c, AutomationPolicyRequest);
+    const [current] = await s.db.select().from(repositoryBindings).where(and(eq(repositoryBindings.projectId, project.id), eq(repositoryBindings.workspaceId, a.workspaceId)));
+    // GitHub App の Repo は起動ラベルを固定する（夜間の除外がこの名前に依存する）
+    if (current?.verification === 'github_app' && body.triggerLabel !== AGENTS_OFFICE_LABEL) {
+      throw new AppError(422, 'TRIGGER_LABEL_FIXED', `GitHub App で接続した Repo の起動ラベルは「${AGENTS_OFFICE_LABEL}」に固定です`);
+    }
     const [b] = await s.db
       .update(repositoryBindings)
       .set({

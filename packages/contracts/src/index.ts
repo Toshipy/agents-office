@@ -67,16 +67,18 @@ export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = [
  *  - waiting_review → needs_input は基本設計書 4.3「上限超過 → needs_input / escalated」に基づく
  *  - validating → needs_input / needs_input → running・validating は、Claude のサブスク利用上限で
  *    工程を一時停止し、人の「続行」でその工程から再開するための追加（利用者の要望による）
+ *  - 終端でない全状態 → approved は、PR が GitHub で人の手でマージされたとき、どの状態の Run も完了に
+ *    するための追加（レビュー待ちより前に PR が先にマージされても Run を取り残さない）
  */
 export const RUN_TRANSITIONS: Record<RunStatus, readonly RunStatus[]> = {
-  queued: ['planning', 'cancelled'],
-  planning: ['running', 'needs_input', 'failed', 'cancelled'],
-  running: ['validating', 'needs_input', 'failed', 'cancelled'],
-  validating: ['pr_ready', 'running', 'needs_input', 'failed', 'cancelled'],
-  pr_ready: ['waiting_review', 'failed', 'cancelled'],
+  queued: ['planning', 'approved', 'cancelled'],
+  planning: ['running', 'needs_input', 'failed', 'approved', 'cancelled'],
+  running: ['validating', 'needs_input', 'failed', 'approved', 'cancelled'],
+  validating: ['pr_ready', 'running', 'needs_input', 'failed', 'approved', 'cancelled'],
+  pr_ready: ['waiting_review', 'failed', 'approved', 'cancelled'],
   waiting_review: ['revising', 'approved', 'needs_input', 'cancelled'],
-  revising: ['running', 'failed', 'cancelled'],
-  needs_input: ['planning', 'running', 'validating', 'cancelled'],
+  revising: ['running', 'failed', 'approved', 'cancelled'],
+  needs_input: ['planning', 'running', 'validating', 'approved', 'cancelled'],
   approved: ['completed'],
   completed: [],
   failed: [],
@@ -102,7 +104,8 @@ export const STEP_STATUSES = [
 ] as const;
 export type StepStatus = (typeof STEP_STATUSES)[number];
 
-export const STEP_KEYS = ['plan', 'implement', 'test', 'review', 'draft_pr', 'update_pr'] as const;
+/** materials / post_materials は資料モード（人が決める Issue の判断材料を Issue コメントに書く）の工程 */
+export const STEP_KEYS = ['plan', 'implement', 'test', 'review', 'draft_pr', 'update_pr', 'materials', 'post_materials'] as const;
 export type StepKey = (typeof STEP_KEYS)[number];
 
 /* ------------------------------------------------------------------ */
@@ -112,9 +115,10 @@ export type StepKey = (typeof STEP_KEYS)[number];
 /**
  * pr_review / dangerous_operation は基本設計書 11.1。
  * clarification は UC-05（要件不足・再修正上限超過時のエスカレーション）を表すためにローカル版で追加。
+ * publish は GitHub への書き込み（push・PR の作成と更新）の前に人が内容を確かめる承認。
  * send_message / publish_document は P1 のため未実装。
  */
-export const APPROVAL_ACTION_TYPES = ['pr_review', 'dangerous_operation', 'clarification'] as const;
+export const APPROVAL_ACTION_TYPES = ['pr_review', 'dangerous_operation', 'clarification', 'publish'] as const;
 export type ApprovalActionType = (typeof APPROVAL_ACTION_TYPES)[number];
 
 export const APPROVAL_STATUSES = [
@@ -473,12 +477,15 @@ export const STEP_KEY_LABEL: Record<StepKey, string> = {
   implement: '実装',
   test: 'テスト',
   review: 'レビュー',
-  draft_pr: 'Draft PR作成',
+  draft_pr: 'PR作成',
   update_pr: 'PR更新',
+  materials: '判断材料',
+  post_materials: '資料コメント',
 };
 
 export const APPROVAL_TYPE_LABEL: Record<ApprovalActionType, string> = {
-  pr_review: 'Draft PR レビュー',
+  pr_review: 'PR レビュー',
   dangerous_operation: '危険操作の検知',
   clarification: '判断・追加指示が必要',
+  publish: 'GitHub への書き込み',
 };

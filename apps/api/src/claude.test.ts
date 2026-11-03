@@ -13,6 +13,7 @@ import { loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
 import { runSteps, runs, stepLogs, usageRecords } from './db/schema';
 import type { ClaudeMessagesClient } from './agents/claude/apiBackend';
+import { waitStatusApprovingWith } from './testing/publishApproval';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-claude-'));
 const repo = join(tmp, 'repo');
@@ -54,6 +55,8 @@ const PLAN = {
   needs_human_decision: false,
   questions: [],
   dangerous_operations: [],
+  mode: 'implement',
+  mode_reason: 'コードの変更で完了できる',
 };
 const REVIEW = {
   verdict: 'ready_for_draft_pr',
@@ -61,6 +64,7 @@ const REVIEW = {
   blockers: [],
   nits: ['テスト名をより具体的に'],
   criteria: [{ criterion: 'greet() が "Hello, world" を返す', met: true, note: '' }],
+  needs_design_decision: false,
 };
 
 const fakeClient: ClaudeMessagesClient = {
@@ -121,6 +125,8 @@ async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, timeo
 }
 const runRow = async (id: string) => (await s.db.select().from(runs).where(eq(runs.id, id)))[0];
 const waitStatus = (id: string, status: string) => waitFor(async () => ((await runRow(id)).status === status ? runRow(id) : null));
+/** publish 承認（GitHub への書き込みの前の人の承認）を承認しながら、指定の状態まで待つ */
+const waitStatusApproving = (id: string, status: string) => waitStatusApprovingWith(s.db, req, waitFor, runRow)(id, status);
 
 let projectId = '';
 
@@ -198,7 +204,7 @@ describe('Claude runtime end-to-end (fake client)', () => {
     expect(created.status).toBe(202);
     expect(created.body.runtime).toBe('claude');
     const runId = created.body.runId as string;
-    const waiting = await waitStatus(runId, 'waiting_review');
+    const waiting = await waitStatusApproving(runId, 'waiting_review');
 
     // ブランチとコミット
     const branch = waiting.pr!.branch;

@@ -28,6 +28,12 @@ export function compareVersion(a: string, b: string): number {
   return 0;
 }
 
+/** `claude --help` に --restricted があるか（サーバーモードでは必須。無い CLI では起動を拒む） */
+export async function detectRestrictedSupport(bin: string): Promise<boolean> {
+  const h = await run(bin, ['--help'], { cwd: tmpdir(), timeoutMs: 20_000, env: claudeCliEnv() });
+  return h.code === 0 && /--restricted\b/.test(h.stdout);
+}
+
 export async function probeClaudeCode(bin: string): Promise<NonNullable<ClaudeCodeConfig['detected']>> {
   const opts = { cwd: tmpdir(), timeoutMs: 20_000, env: claudeCliEnv() };
   const v = await run(bin, ['--version'], opts);
@@ -38,9 +44,11 @@ export async function probeClaudeCode(bin: string): Promise<NonNullable<ClaudeCo
       loggedIn: false,
       authMethod: null,
       subscription: false,
+      supportsRestricted: false,
       problem: notFound ? `Claude Code CLI（${bin}）が見つかりません` : `\`${bin} --version\` が失敗しました: ${v.stderr.trim().slice(0, 200)}`,
     };
   }
+  const supportsRestricted = await detectRestrictedSupport(bin);
   const version = /(\d+\.\d+\.\d+)/.exec(v.stdout)?.[1] ?? null;
   const s = await run(bin, ['auth', 'status'], opts);
   let status: { loggedIn?: boolean; authMethod?: string; apiProvider?: string } = {};
@@ -58,7 +66,7 @@ export async function probeClaudeCode(bin: string): Promise<NonNullable<ClaudeCo
   else if (!authMethod && s.code !== 0) problem = '`claude auth status` でログイン状態を確認できません（`claude auth login` でログインしてください）';
   else if (!loggedIn) problem = 'Claude Code にログインしていません（`claude auth login` で claude.ai アカウントにログインしてください）';
   else if (!subscription) problem = `Claude Code は API 課金のログイン方法（${authMethod ?? '不明'}）で動いています。サブスクで使うには \`claude auth login\` で claude.ai アカウントにログインしてください`;
-  return { version, loggedIn, authMethod, subscription, problem };
+  return { version, loggedIn, authMethod, subscription, problem, supportsRestricted };
 }
 
 /** auth status の authMethod を表示用に */

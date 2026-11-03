@@ -1,7 +1,8 @@
 /**
  * GitHub 上のリポジトリを、サーバー上の管理クローン（.data/repos/<repositoryId>）経由で扱う。
  *  - prepare: クローン（初回）/ fetch して、Run の作業ブランチの起点（origin/<既定ブランチ>）を返す
- *  - publish: ai/ ブランチを push し、Draft PR を作成（更新時は push のみ。PR は GitHub 側で自動更新される）
+ *  - publish: ai/ ブランチを push し、PR を作成（更新時は push のみ。PR は GitHub 側で自動更新される）
+ *  - postMaterialsComment / editIssueLabels / unassignSelf: 資料モードの Issue コメントと終わりのラベル・アサイン操作
  *
  * Installation token は GIT_ASKPASS 経由で git に渡す（コマンド引数・remote URL・git の設定に残さない）。
  * credential.helper は空にして、OS の資格情報ストアにも保存させない。
@@ -12,8 +13,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import type { StepExecutionContext } from '../agents/runner';
 import { RunnerError } from '../agents/runner';
-import { headSha, run, safeEnv } from '../agents/claude/git';
+import { headSha, run, safeEnv, wtArgs, type Worktree } from '../agents/claude/git';
 import { Mutex } from '../lib/mutex';
+import { isMaterialsCommentOf } from '../agents/claude/materials';
 import { GithubApiError, type GithubApp } from './app';
 
 export interface RemoteRepo {
@@ -29,10 +31,19 @@ export interface RemoteRepoHost {
   prepare(ctx: StepExecutionContext, localPath: string, remote: RemoteRepo): Promise<{ baseRef: string }>;
   publish(
     ctx: StepExecutionContext,
-    worktree: string,
+    wt: Worktree,
     remote: RemoteRepo,
-    args: { branch: string; existing: { number: number; url: string } | null; title: string; body: string },
+    /** headSha は人が publish 承認で確かめたコミット。push するのはこのコミットだけ（worktree の HEAD ではない） */
+    args: { branch: string; headSha: string; existing: { number: number; url: string } | null; title: string; body: string },
   ): Promise<{ number: number; url: string; headSha: string }>;
+  /** GitHub 上の ai/ ブランチに人が足したコミットを worktree へ取り込む。履歴が分岐していたら BRANCH_DIVERGED */
+  syncBranch(ctx: StepExecutionContext, wt: Worktree, remote: RemoteRepo, branch: string): Promise<'up_to_date' | 'fast_forwarded'>;
+  /** 資料コメントを Issue に投稿する。同じ Run の資料コメント（本文に run: <runId>）が既にあれば投稿しない */
+  postMaterialsComment(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number, body: string): Promise<'posted' | 'already_posted'>;
+  /** Issue のラベルを外し・付ける（既に無いラベルの取り外しは成功とみなす） */
+  editIssueLabels(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number, labels: { remove: string[]; add: string[] }): Promise<void>;
+  /** 自分（PAW_GITHUB_LOGIN）を Issue のアサインから外す */
+  unassignSelf(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number): Promise<void>;
 }
 
 const ASKPASS = `#!/bin/sh
@@ -62,6 +73,8 @@ export class GithubRepoHost implements RemoteRepoHost {
   constructor(
     private readonly app: GithubApp,
     private readonly dataRoot: string,
+    /** 自分の GitHub ログイン名（資料モードで自分のアサインを外すときに使う） */
+    private readonly login: string | null = null,
   ) {}
 
   private lock(repositoryId: number) {
@@ -119,35 +132,142 @@ export class GithubRepoHost implements RemoteRepoHost {
 
   async publish(
     ctx: StepExecutionContext,
-    worktree: string,
+    wt: Worktree,
     remote: RemoteRepo,
-    args: { branch: string; existing: { number: number; url: string } | null; title: string; body: string },
+    args: { branch: string; headSha: string; existing: { number: number; url: string } | null; title: string; body: string },
   ) {
     if (!/^ai\/[A-Za-z0-9._/-]+$/.test(args.branch)) throw new RunnerError('ai/ 以外のブランチには push しません', 'POLICY_DENIED', false);
+    // 承認した SHA だけを push する（参照名やオプションとして解釈される値は受け付けない）
+    if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(args.headSha)) throw new RunnerError('承認したコミットの SHA が不正です', 'POLICY_DENIED', false);
     const env = await this.gitEnv(remote.installationId);
     // 強制 push はしない（人が同じブランチに追加したコミットを消さない）
     // フックは実行しない（リポジトリ由来の設定でトークンを持つプロセスにコードを実行させない）
-    const r = await run('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', 'push', '--quiet', '--no-verify', 'origin', `HEAD:refs/heads/${args.branch}`], {
-      cwd: worktree,
-      env,
+    // 作業ツリーの .git は信用せず記録した gitDir を使い、push 先も origin ではなく取得済みのクローン URL を明示する
+    // push するのは worktree の HEAD ではなく承認したコミット（照合の後に HEAD が動いても、承認していない内容は出さない）
+    const push = wtArgs(wt, ['push', '--quiet', '--no-verify', remote.cloneUrl, `${args.headSha}:refs/heads/${args.branch}`]);
+    const r = await run('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', ...push.args], {
+      cwd: push.cwd,
+      // 拒否の判定は git の出力の文言で行うため、翻訳されない英語の出力にする
+      env: { ...env, LC_ALL: 'C' },
       timeoutMs: 10 * 60_000,
       signal: ctx.signal,
     });
-    if (r.code !== 0) throw new RunnerError(`ブランチ ${args.branch} を push できません: ${r.stderr.trim().slice(-300)}`, 'GIT_PUSH_FAILED', false);
-    const sha = await headSha(worktree);
+    if (r.code !== 0) {
+      // GitHub 側に Run に無いコミットがある（承認待ちの間に人が同じブランチへ push した等）。呼び出し側が取り込みを試す
+      if (/\[rejected\]|non-fast-forward|fetch first/i.test(r.stderr)) {
+        throw new RunnerError(`ブランチ ${args.branch} の GitHub 側に Run に無いコミットがあるため push できません: ${r.stderr.trim().slice(-300)}`, 'GIT_PUSH_REJECTED', false);
+      }
+      throw new RunnerError(`ブランチ ${args.branch} を push できません: ${r.stderr.trim().slice(-300)}`, 'GIT_PUSH_FAILED', false);
+    }
+    const sha = args.headSha;
     await ctx.log(`GitHub に push: ${args.branch}（${sha.slice(0, 7)}）`);
     if (args.existing) return { number: args.existing.number, url: args.existing.url, headSha: sha };
     try {
-      const pr = await this.app.createDraftPullRequest(remote.installationId, remote.fullName, {
+      // 再試行で PR 作成が 2 回目になっても 422 にならないよう、先に同じブランチの open な PR を探す
+      const found = await this.app.findOpenPullByHead(remote.installationId, remote.fullName, args.branch);
+      if (found) {
+        await ctx.log(`既存の PR #${found.number} を使用: ${found.htmlUrl}`);
+        return { number: found.number, url: found.htmlUrl, headSha: sha };
+      }
+      const pr = await this.app.createPullRequest(remote.installationId, remote.fullName, {
         title: args.title.slice(0, 250),
         head: args.branch,
         base: remote.defaultBranch,
         body: args.body.slice(0, 60_000),
       });
-      await ctx.log(`Draft PR #${pr.number} を作成: ${pr.htmlUrl}`);
+      await ctx.log(`PR #${pr.number} を作成: ${pr.htmlUrl}`);
       return { number: pr.number, url: pr.htmlUrl, headSha: sha };
     } catch (err) {
-      throw githubRunnerError(err, 'Draft PR を作成できません');
+      throw githubRunnerError(err, 'PR を作成できません');
     }
+  }
+
+  async postMaterialsComment(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number, body: string): Promise<'posted' | 'already_posted'> {
+    try {
+      // 投稿の後で落ちた工程の再試行・再起動で二重に書かないよう、同じ Run の資料コメントを先に探す
+      const comments = await this.app.listIssueComments(remote.installationId, remote.fullName, issueNumber);
+      if (comments.some((c) => isMaterialsCommentOf(c.body, ctx.runId))) {
+        await ctx.log(`Issue #${issueNumber} にはこの Run の資料コメントが既にあるため、投稿しません`);
+        return 'already_posted';
+      }
+      // 本文は人が承認したものをそのまま書く（長さは資料を作るときに収めてある）
+      await this.app.commentOnIssue(remote.installationId, remote.fullName, issueNumber, body);
+      await ctx.log(`Issue #${issueNumber} に資料コメントを投稿しました`);
+      return 'posted';
+    } catch (err) {
+      throw githubRunnerError(err, '資料コメントを投稿できません');
+    }
+  }
+
+  async editIssueLabels(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number, labels: { remove: string[]; add: string[] }): Promise<void> {
+    try {
+      for (const l of labels.remove) await this.app.removeLabel(remote.installationId, remote.fullName, issueNumber, l);
+      if (labels.add.length) await this.app.addLabels(remote.installationId, remote.fullName, issueNumber, labels.add);
+      await ctx.log(`Issue #${issueNumber} のラベル: 外す ${labels.remove.join(', ') || 'なし'} / 付ける ${labels.add.join(', ') || 'なし'}`);
+    } catch (err) {
+      throw githubRunnerError(err, 'Issue のラベルを変更できません');
+    }
+  }
+
+  async unassignSelf(ctx: StepExecutionContext, remote: RemoteRepo, issueNumber: number): Promise<void> {
+    if (!this.login) throw new RunnerError('自分の GitHub ログイン名が未設定です（PAW_GITHUB_LOGIN）', 'GITHUB_LOGIN_UNSET', false);
+    try {
+      await this.app.removeAssignees(remote.installationId, remote.fullName, issueNumber, [this.login]);
+      await ctx.log(`Issue #${issueNumber} の自分のアサインを外しました`);
+    } catch (err) {
+      throw githubRunnerError(err, 'Issue のアサインを外せません');
+    }
+  }
+
+  async syncBranch(ctx: StepExecutionContext, wt: Worktree, remote: RemoteRepo, branch: string): Promise<'up_to_date' | 'fast_forwarded'> {
+    if (!/^ai\/[A-Za-z0-9._/-]+$/.test(branch)) throw new RunnerError('ai/ 以外のブランチは取り込みません', 'POLICY_DENIED', false);
+    const env = await this.gitEnv(remote.installationId);
+    const tracking = `refs/remotes/origin/${branch}`;
+    // 作業ツリーの .git は信用せず記録した gitDir を使い、取得先も取得済みのクローン URL を明示する（refs は共有オブジェクトストアに入る）
+    const fetch = wtArgs(wt, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', remote.cloneUrl, `+refs/heads/${branch}:${tracking}`]);
+    // 管理クローンの fetch と同じ共有オブジェクトストアを触るので、リポジトリ単位の排他に入れる
+    const f = await this.lock(remote.repositoryId).run(() =>
+      run('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', ...fetch.args], {
+        cwd: fetch.cwd,
+        env,
+        timeoutMs: 10 * 60_000,
+        signal: ctx.signal,
+      }),
+    );
+    if (f.code !== 0) {
+      // まだ GitHub に無いブランチなら、取り込むものは無い
+      if (/couldn't find remote ref/i.test(f.stderr)) return 'up_to_date';
+      throw new RunnerError(`ブランチ ${branch} を取得できません: ${f.stderr.trim().slice(-300)}`, 'GIT_FETCH_FAILED', true);
+    }
+    const git = async (args: string[]) => {
+      const a = wtArgs(wt, args);
+      return run('git', ['-c', 'core.hooksPath=/dev/null', ...a.args], { cwd: a.cwd, env: safeEnv(), timeoutMs: 120_000, signal: ctx.signal });
+    };
+    // merge-base --is-ancestor は 0=祖先 / 1=祖先でない / それ以外（128 等）=git の失敗。失敗を「分岐」と取り違えない
+    const isAncestor = async (a: string, b: string) => {
+      const r = await git(['merge-base', '--is-ancestor', a, b]);
+      if (r.code === 0) return true;
+      if (r.code === 1) return false;
+      throw new RunnerError(`履歴を比較できません: ${r.stderr.trim().slice(-300)}`, 'GIT_COMPARE_FAILED', false);
+    };
+    const rp = await git(['rev-parse', '--verify', tracking]);
+    if (rp.code !== 0) throw new RunnerError(`取得したブランチを読めません: ${rp.stderr.trim().slice(-300)}`, 'GIT_COMPARE_FAILED', false);
+    const remoteSha = rp.stdout.trim();
+    const local = await headSha(wt);
+    if (remoteSha === local) return 'up_to_date';
+    // GitHub 側が worktree の祖先なら、人は何も足していない（AI の未 push 分が進んでいるだけ）
+    if (await isAncestor(remoteSha, 'HEAD')) return 'up_to_date';
+    // worktree が GitHub 側の祖先なら fast-forward で人のコミットを取り込む
+    if (await isAncestor('HEAD', remoteSha)) {
+      const m = await git(['merge', '--ff-only', '--quiet', remoteSha]);
+      if (m.code !== 0) throw new RunnerError(`人のコミットを取り込めません: ${m.stderr.trim().slice(-300)}`, 'GIT_MERGE_FAILED', false);
+      await ctx.log(`GitHub の ${branch} に足された人のコミットを取り込みました（${remoteSha.slice(0, 7)}）`);
+      return 'fast_forwarded';
+    }
+    throw new RunnerError(
+      `ブランチ ${branch} は GitHub 側と履歴が分岐しています（GitHub: ${remoteSha.slice(0, 7)} / Run: ${local.slice(0, 7)}）。人の判断が必要です`,
+      'BRANCH_DIVERGED',
+      false,
+    );
   }
 }

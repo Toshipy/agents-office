@@ -2,8 +2,9 @@
 # 配置先: /etc/systemd/system/paw.service
 [Unit]
 Description=Personal AI Workspace
-After=network-online.target
+After=network-online.target docker.service
 Wants=network-online.target
+Requires=docker.service
 
 [Service]
 Type=simple
@@ -17,6 +18,8 @@ Environment=PATH=/home/paw/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PAW_SERVE_WEB=1
 Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 Environment=NODE_ENV=production
+# Tester 用の Docker ネットワークと通信制限を整える（+ は root で実行し、User=paw や NoNewPrivileges の影響を受けない）
+ExecStartPre=+/usr/local/sbin/paw-test-network
 ExecStart=/usr/bin/env pnpm --filter @paw/api start
 Restart=on-failure
 RestartSec=5

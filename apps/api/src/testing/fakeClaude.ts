@@ -29,7 +29,8 @@ if (schema && JSON.parse(schema).$schema) {
   process.stderr.write('Error: --json-schema is not a valid JSON Schema: no schema with key or ref "' + JSON.parse(schema).$schema + '"\n');
   process.exit(1);
 }
-const purpose = schema ? (schema.includes('verdict') ? 'review' : 'plan') : 'develop';
+// 構造化出力のスキーマで工程を見分ける（review は verdict、materials は markdown だけを持つ）
+const purpose = schema ? (schema.includes('verdict') ? 'review' : schema.includes('"markdown"') ? 'materials' : 'plan') : 'develop';
 const countsFile = join(here, 'counts.json');
 const counts = existsSync(countsFile) ? JSON.parse(readFileSync(countsFile, 'utf8')) : {};
 counts[purpose] = (counts[purpose] ?? 0) + 1;
@@ -41,6 +42,11 @@ const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 out({ type: 'system', subtype: 'init', model: 'claude-test-model', apiKeySource: b.apiKeySource ?? 'none', claude_code_version: '2.1.316', tools: (opt('--tools') ?? '').split(','), cwd: process.cwd(), permissionMode: opt('--permission-mode') });
 const modelUsage = { 'claude-test-model': { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 10, cacheCreationInputTokens: 5, costUSD: 0.0123 } };
 const result = (extra) => out({ type: 'result', subtype: 'success', is_error: false, result: 'done', duration_ms: 7, num_turns: 2, total_cost_usd: 0.0123, usage: {}, modelUsage, permission_denials: [], ...extra });
+// SIGINT を受けても slow_exit_ms だけ生き続けてから終わる（中止が CLI の終了を待つことの検証用）
+if (b.kind === 'slow_exit') {
+  process.on('SIGINT', () => setTimeout(() => process.exit(130), b.slowExitMs ?? 1000));
+  await new Promise((r) => setTimeout(r, 60000));
+}
 if (b.kind === 'hang') { await new Promise((r) => setTimeout(r, 60000)); }
 if (b.kind === 'usage_limit') {
   out({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: Math.floor(Date.now() / 1000) + 3600 } });

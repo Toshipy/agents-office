@@ -140,8 +140,11 @@ const TOKENS: Record<StepKey, [number, number]> = {
   review: [8200, 1500],
   draft_pr: [0, 0],
   update_pr: [0, 0],
+  // 資料モードはデモでは使わない（型を満たすため）
+  materials: [4200, 1500],
+  post_materials: [0, 0],
 };
-const DURATION: Record<StepKey, number> = { plan: 6500, implement: 11000, test: 7500, review: 6500, draft_pr: 2600, update_pr: 2400 };
+const DURATION: Record<StepKey, number> = { plan: 6500, implement: 11000, test: 7500, review: 6500, draft_pr: 2600, update_pr: 2400, materials: 6500, post_materials: 2000 };
 
 let idSeq = 0;
 const nid = (p: string) => `${p}_${(++idSeq).toString(36).padStart(4, '0')}${Math.random().toString(36).slice(2, 8)}`;
@@ -199,7 +202,7 @@ class DemoServer {
       position: i,
       repo,
       automation,
-      triggerLabel: 'ai:ready',
+      triggerLabel: 'agents-office',
       maxRevisionAttempts: 3,
       nextPr: 40 + i * 7,
       nextIssue: 120 + i * 11,
@@ -377,7 +380,7 @@ class DemoServer {
         lines.push(['tool', 'diff.read — 差分を取得'], ['tool', 'ci.read — テスト結果を確認'], ['log', '受入条件との照合中…'], ['tool', 'review.write — 指摘: blocker 0 / nit 2']);
         break;
       default:
-        lines.push(['tool', `github.branch.push — ブランチを push: ${c.branch}`], ['tool', st.key === 'update_pr' ? `github.pull_request.update — Draft PR #${run.pr?.number} を更新` : 'github.pull_request.create_draft — Draft PR を作成（base: main）']);
+        lines.push(['tool', `github.branch.push — ブランチを push: ${c.branch}`], ['tool', st.key === 'update_pr' ? `github.pull_request.update — Draft PR #${run.pr?.number} を更新` : 'github.pull_request.create — Draft PR を作成（base: main）']);
     }
     return lines.map(([kind, message], i) => ({ at: ((i + 0.6) / (lines.length + 0.4)) * st.duration, kind, message }));
   }
@@ -676,7 +679,7 @@ class DemoServer {
       ['設定画面のフォームバリデーションを強化', '必須項目が空のまま保存できてしまう。'],
     ];
     const [title, body] = ISSUES[Math.floor(Math.random() * ISSUES.length)];
-    this.issue(p, title, body, Math.random() > 0.12 ? ['ai:ready', 'enhancement'] : ['question']);
+    this.issue(p, title, body, Math.random() > 0.12 ? ['agents-office', 'enhancement'] : ['question']);
   }
 
   issue(p: MProject, title: string, body: string, labels: string[]) {
@@ -912,6 +915,8 @@ class DemoServer {
       }];
     }
     if (method === 'GET' && path === '/v1/audit-logs') return [200, { items: this.audit.slice(0, 100) }];
+    // Issue 一覧は GitHub App 接続の Project だけの機能。デモでは空を返す（任せる操作は再現しない）
+    if (method === 'GET' && /^\/v1\/projects\/[^/]+\/issues$/.test(path)) return [200, { candidates: [], materials: [], running: [] }];
     if (method === 'GET' && path === '/v1/projects') return [200, { items: this.projects.map((p) => this.projectDto(p)) }];
     if (method === 'GET' && path === '/v1/integrations/github/installations') return [200, { mode: 'simulated', installations: [] }];
     if ((m = path.match(/^\/v1\/projects\/([^/]+)\/automation-policy$/)) && method === 'PUT') {

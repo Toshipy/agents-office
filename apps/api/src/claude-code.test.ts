@@ -5,17 +5,18 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { defaultClaudeCodeConfig, loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
-import { runSteps, runs, usageRecords } from './db/schema';
+import { approvals, artifacts, runSteps, runs, usageRecords } from './db/schema';
 import { ClaudeCodeBackend } from './agents/claude/cliBackend';
 import { probeClaudeCode, resolveAgentRuntime } from './agents/claude/detect';
 import { RunnerError, type StepExecutionContext } from './agents/runner';
 import { FAKE_CLAUDE_CLI } from './testing/fakeClaude';
+import { decidePublish, pendingPublish, waitStatusApprovingWith } from './testing/publishApproval';
 
 const tmp = mkdtempSync(join(tmpdir(), 'paw-cc-'));
 const repo = join(tmp, 'repo');
@@ -44,8 +45,10 @@ const PLAN = {
   needs_human_decision: false,
   questions: [],
   dangerous_operations: [],
+  mode: 'implement',
+  mode_reason: 'コードの変更で完了できる',
 };
-const REVIEW = { verdict: 'ready_for_draft_pr', summary: '問題なし', blockers: [], nits: [], criteria: [{ criterion: 'greet() が Hello, world を返す', met: true, note: '' }] };
+const REVIEW = { verdict: 'ready_for_draft_pr', summary: '問題なし', blockers: [], nits: [], criteria: [{ criterion: 'greet() が Hello, world を返す', met: true, note: '' }], needs_design_decision: false };
 const GOOD_DEV = { writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Hello, world';\n" }], text: 'greet の文言を変更しました' };
 
 function setScenario(sc: Record<string, unknown>) {
@@ -83,6 +86,8 @@ async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, timeo
 }
 const runRow = async (id: string) => (await s.db.select().from(runs).where(eq(runs.id, id)))[0];
 const waitStatus = (id: string, ...status: string[]) => waitFor(async () => (status.includes((await runRow(id)).status) ? runRow(id) : null));
+/** publish 承認（GitHub への書き込みの前の人の承認）を承認しながら、指定の状態まで待つ */
+const waitStatusApproving = (id: string, ...status: string[]) => waitStatusApprovingWith(s.db, req, waitFor, runRow)(id, ...status);
 
 async function startRun(request = 'greet の文言を Hello, world に変更して') {
   const created = await req('POST', '/v1/runs', { projectId, request });
@@ -146,11 +151,12 @@ afterAll(async () => {
 
 beforeEach(() => setScenario({}));
 
-describe('Claude Code (subscription) runtime — fake CLI', () => {
+// publish 承認の往復が増えたため、並列実行で遅くなっても切れない上限にする
+describe('Claude Code (subscription) runtime — fake CLI', { timeout: 30_000 }, () => {
   it('runs plan → implement → test → review → draft PR through `claude -p` with locked-down options', async () => {
     setScenario({ plan: [{ output: PLAN }], develop: [GOOD_DEV], review: [{ output: REVIEW }] });
     const runId = await startRun();
-    const run = await waitStatus(runId, 'waiting_review', 'failed');
+    const run = await waitStatusApproving(runId, 'waiting_review', 'failed');
     expect(run.status).toBe('waiting_review');
 
     // AI ブランチにコミットされ、元のリポジトリの main は変わっていない
@@ -170,7 +176,8 @@ describe('Claude Code (subscription) runtime — fake CLI', () => {
       expect(settings.permissions.blockReadsOutsideWorkingDirectories).toBe(true);
       expect(settings.permissions.deny).toEqual(expect.arrayContaining(['Edit(.github/workflows/**)', 'Edit(.claude/**)', 'Read(.env)']));
       // 作業は Run 専用の worktree で行う
-      expect(c.cwd.startsWith(join(dataRoot, 'worktrees'))).toBe(true);
+      // macOS は /var が /private/var の実体パスになるため、両辺を実体パスにしてから比べる
+      expect(realpathSync(c.cwd).startsWith(realpathSync(join(dataRoot, 'worktrees')))).toBe(true);
       // 依頼本文は標準入力（非信頼入力として囲む）
       expect(c.stdin).toContain('<untrusted_request>');
       // API キーや親の Claude Code セッションの環境変数は渡さない（渡すと API 課金になる）
@@ -252,7 +259,7 @@ describe('Claude Code (subscription) runtime — fake CLI', () => {
 
     const d = await req('POST', `/v1/approvals/${ap.id}/decision`, { decision: 'approve', expectedVersion: ap.version, confirmationDigest: ap.payloadDigest });
     expect(d.status).toBe(200);
-    const done = await waitStatus(runId, 'waiting_review', 'failed');
+    const done = await waitStatusApproving(runId, 'waiting_review', 'failed');
     expect(done.status).toBe('waiting_review');
     // 計画はやり直さず、止まった Developer の工程から再開している
     expect(counts()).toEqual({ plan: 1, develop: 2, review: 1 });
@@ -304,6 +311,130 @@ describe('Claude Code (subscription) runtime — fake CLI', () => {
       }
     }, 15000);
     expect((await runRow(runId)).status).toBe('cancelled');
+  });
+});
+
+// 2 回の Developer を通すため、並列実行で遅くなっても切れない上限にする
+describe('publish 承認（GitHub への書き込みの前の人の承認）', { timeout: 30_000 }, () => {
+  const branchOf = (runId: string) => `ai/run-${runId.slice(4, 14).toLowerCase()}`;
+
+  it('AI レビューが通ると needs_input で publish 承認を待ち、承認するまで PR を作らない', async () => {
+    setScenario({ plan: [{ output: PLAN }], develop: [GOOD_DEV], review: [{ output: REVIEW }] });
+    const runId = await startRun();
+    const paused = await waitStatus(runId, 'needs_input', 'failed', 'waiting_review');
+    expect(paused.status).toBe('needs_input');
+    expect(paused.pr).toBeNull();
+    const ap = await pendingPublish(s.db, runId);
+    expect(ap).not.toBeNull();
+    expect(ap!.actionType).toBe('publish');
+    expect(ap!.payload).toMatchObject({
+      kind: 'pull_request',
+      headSha: git(repo, 'rev-parse', branchOf(runId)).trim(),
+      title: paused.title,
+      labels: { remove: [], add: [] },
+      update: false,
+    });
+    expect(String(ap!.payload.diffSha256)).toMatch(/^[0-9a-f]{64}$/);
+    // 承認カードが開く差分は、承認する差分と同じ中身の成果物
+    const diffArts = (await s.db.select().from(artifacts).where(eq(artifacts.runId, runId))).filter((x) => x.kind === 'diff');
+    // implement の差分と publish の差分が同じ中身で 2 件になりうる。どちらでも、結び付くのは同じ中身の成果物
+    expect(diffArts.filter((x) => x.checksum === `sha256:${ap!.payload.diffSha256}`).map((x) => x.id)).toContain(ap!.payload.diffArtifactId);
+    expect(ap!.payload.diffArtifactId).toEqual(expect.any(String));
+    expect(String(ap!.payload.body)).toContain('この PR は agents-office が作りました。マージは人が行います。');
+    // 画面からの指示の Run（Issue なし）は Closes 行を付けない
+    expect(String(ap!.payload.body)).not.toContain('Closes #');
+    // 期限は 72 時間（作成時刻は DB の既定値、期限はエンジンの時計なので数秒の誤差を許す）
+    expect(Math.abs(ap!.expiresAt.getTime() - ap!.createdAt.getTime() - 72 * 3600_000)).toBeLessThan(5_000);
+    const before = await s.db.select().from(runSteps).where(eq(runSteps.runId, runId));
+    expect(before.some((x) => x.key === 'draft_pr')).toBe(false);
+
+    await decidePublish(s.db, req, runId);
+    const done = await waitStatus(runId, 'waiting_review', 'failed');
+    expect(done.status).toBe('waiting_review');
+    expect(done.pr!.headSha).toBe(ap!.payload.headSha);
+    const [decided] = await s.db.select().from(approvals).where(eq(approvals.id, ap!.id));
+    expect(decided.status).toBe('approved');
+  });
+
+  it('差し戻すと指示を付けて implement が再び動き、新しい publish 承認の headSha が変わる', async () => {
+    setScenario({
+      plan: [{ output: PLAN }],
+      develop: [GOOD_DEV, { writes: [{ path: 'src/greet.ts', content: "export const greet = () => 'Hello, world!';\n" }], text: '! を足しました' }],
+      review: [{ output: REVIEW }],
+    });
+    const runId = await startRun();
+    expect((await waitStatus(runId, 'needs_input', 'failed')).status).toBe('needs_input');
+    const first = (await pendingPublish(s.db, runId))!;
+    await decidePublish(s.db, req, runId, 'request_changes', '末尾に ! を付けて');
+    const second = await waitFor(async () => {
+      const ap = await pendingPublish(s.db, runId);
+      return ap && ap.id !== first.id ? ap : null;
+    });
+    expect(counts().develop).toBe(2);
+    expect(calls().filter((c) => c.purpose === 'develop')[1].stdin).toContain('末尾に ! を付けて');
+    expect(second.payload.headSha).not.toBe(first.payload.headSha);
+    expect(second.payload.headSha).toBe(git(repo, 'rev-parse', branchOf(runId)).trim());
+    expect((await runRow(runId)).status).toBe('needs_input');
+    expect((await runRow(runId)).pr).toBeNull();
+    const [old] = await s.db.select().from(approvals).where(eq(approvals.id, first.id));
+    expect(old.status).toBe('changes_requested');
+  });
+
+  it('却下すると PR を作らずに Run を中止する', async () => {
+    setScenario({ plan: [{ output: PLAN }], develop: [GOOD_DEV], review: [{ output: REVIEW }] });
+    const runId = await startRun();
+    expect((await waitStatus(runId, 'needs_input', 'failed')).status).toBe('needs_input');
+    await decidePublish(s.db, req, runId, 'reject');
+    const run = await waitStatus(runId, 'cancelled', 'failed', 'waiting_review');
+    expect(run.status).toBe('cancelled');
+    expect(run.pr).toBeNull();
+  });
+});
+
+describe('Claude Code cancel waits for exit', () => {
+  it('CLI のプロセスが終わってから cancelRun が返る', async () => {
+    // SIGINT を受けても 1 秒生き続ける偽 CLI
+    setScenario({ plan: [{ kind: 'slow_exit', slowExitMs: 1000 }] });
+    const runId = await startRun();
+    await waitFor(async () => calls().length > 0);
+    const pid = calls()[0].pid;
+    await new Promise((r) => setTimeout(r, 200)); // SIGINT ハンドラの登録を待つ
+    const row = await s.engine.cancelRun(runId, 'test');
+    expect(row?.status).toBe('cancelled');
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      alive = (e as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+    expect(alive).toBe(false);
+  });
+});
+
+describe('Claude Code kill switch', () => {
+  it('実行中の Run が複数あっても、CLI の終了を直列に待たず同時に止める', async () => {
+    const p2 = (await req('POST', '/v1/projects', { name: 'Local2', color: '#38e1ff' })).body.id as string;
+    await req('POST', `/v1/projects/${p2}/repositories`, { fullName: 'me/local-repo2' });
+    expect((await req('PUT', `/v1/projects/${p2}/local-repo`, { localPath: repo, testCommand: 'git status --short' })).status).toBe(200);
+    const slowMs = 2000;
+    setScenario({ plan: [{ kind: 'slow_exit', slowExitMs: slowMs }] });
+    const r1 = await startRun();
+    const created = await req('POST', '/v1/runs', { projectId: p2, request: '別の変更' });
+    expect(created.status).toBe(202);
+    await waitFor(async () => calls().length >= 2);
+    await new Promise((r) => setTimeout(r, 200)); // SIGINT ハンドラの登録を待つ
+    const t0 = Date.now();
+    const k = await req('POST', '/v1/workspaces/me/kill-switch', { action: 'pause', cancelActive: true });
+    const elapsed = Date.now() - t0;
+    expect(k.status).toBe(200);
+    expect(k.body.cancelled).toBeGreaterThanOrEqual(2);
+    // 直列なら 2 × slowMs 以上かかる
+    expect(elapsed).toBeLessThan(slowMs * 1.8);
+    for (const c of calls()) {
+      expect(() => process.kill(c.pid, 0)).toThrow();
+    }
+    expect((await runRow(r1)).status).toBe('cancelled');
+    await req('POST', '/v1/workspaces/me/kill-switch', { action: 'resume', cancelActive: false });
   });
 });
 

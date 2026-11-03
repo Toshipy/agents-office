@@ -25,6 +25,7 @@ import type { Db } from '../db/client';
 import {
   agentDefinitions,
   approvals,
+  artifacts,
   repositoryBindings,
   runSteps,
   runs,
@@ -39,10 +40,11 @@ import { newId } from '../lib/ids';
 import { digestPayload } from '../lib/crypto';
 import { log } from '../lib/logger';
 import { Mutex } from '../lib/mutex';
-import type { AgentRunner, StepExecutionContext, StepOutput } from '../agents/runner';
-import { RunnerCrashError, RunnerError, UsageLimitError } from '../agents/runner';
+import type { AgentRunner, MaterialsPreview, PublishPreview, StepExecutionContext, StepOutput } from '../agents/runner';
+import { PublishStaleError, RunnerCrashError, RunnerError, UsageLimitError } from '../agents/runner';
 import type { ArtifactStore } from './artifactStore';
 import { authorizeTool } from './toolBroker';
+import { AGENTS_OFFICE_LABEL, NEEDS_HUMAN_LABEL } from '../github/labels';
 
 export type RunRow = typeof runs.$inferSelect;
 export type StepRow = typeof runSteps.$inferSelect;
@@ -55,6 +57,7 @@ const APPROVAL_TTL_MS: Record<ApprovalActionType, number> = {
   pr_review: 14 * 24 * 3600_000,
   dangerous_operation: 72 * 3600_000,
   clarification: 72 * 3600_000,
+  publish: 72 * 3600_000,
 };
 
 const PlanSchema = z.object({
@@ -87,6 +90,8 @@ interface Inflight {
   controller: AbortController;
   runId: string;
   cancelled: boolean;
+  /** 工程の実行（終了処理を含む）が済んだら解決する。中止・片付けはこれを待つ */
+  done: Promise<void>;
 }
 
 export function branchFor(runId: string): string {
@@ -108,6 +113,12 @@ export class WorkflowEngine {
     private readonly runner: AgentRunner,
     private readonly config: AppConfig,
   ) {}
+
+  /** 失敗・中止で終わった Issue の Run の GitHub を片付ける処理（GitHub App が無ければ未設定） */
+  private issueCleanup: { onAbandoned(run: RunRow): Promise<void> } | null = null;
+  setIssueCleanup(cleanup: { onAbandoned(run: RunRow): Promise<void> } | null) {
+    this.issueCleanup = cleanup;
+  }
 
   /* ------------------------------------------------------------ */
   /* lifecycle                                                     */
@@ -263,9 +274,42 @@ export class WorkflowEngine {
     return this.config.agentRuntime !== 'simulated' && binding?.localPath ? this.config.agentRuntime : 'simulated';
   }
 
+  /** その Run の実行中工程を中止させる。待つのは呼び出し側（Run のロックの外で waitFlights する） */
+  private abortRunFlights(runId: string, reason: string): Inflight[] {
+    const flights: Inflight[] = [];
+    for (const f of this.inflight.values()) {
+      if (f.runId !== runId) continue;
+      f.cancelled = true;
+      f.controller.abort(new StepCancelledError(reason));
+      flights.push(f);
+    }
+    return flights;
+  }
+
+  /** 工程の終了を最長 15 秒待つ（Claude CLI は SIGINT 後もしばらく生きるため） */
+  private async waitFlights(flights: Inflight[]) {
+    if (flights.length === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    const limit = new Promise<void>((resolve) => (timer = setTimeout(resolve, 15_000)));
+    await Promise.race([Promise.all(flights.map((f) => f.done)), limit]);
+    clearTimeout(timer);
+  }
+
   private async cleanupRun(run: RunRow) {
+    // 失敗・中止の Issue Run だけ、agents-office ラベルと自分のアサインを外す（完了は PR・資料の工程が済ませている）
+    if (this.issueCleanup && (run.status === 'failed' || run.status === 'cancelled') && run.source.type === 'github_issue') {
+      try {
+        // 実行中の工程が GitHub を書き換えている途中で外さない
+        await this.waitFlights([...this.inflight.values()].filter((f) => f.runId === run.id));
+        await this.issueCleanup.onAbandoned(run);
+      } catch (err) {
+        log.warn('issue cleanup failed', { runId: run.id, err: String(err) });
+      }
+    }
     if (run.runtime === 'simulated' || !this.runner.onRunFinished) return;
     try {
+      // 実行中の工程（CLI プロセス）が終わる前に worktree を消さない
+      await this.waitFlights([...this.inflight.values()].filter((f) => f.runId === run.id));
       const [binding] = await this.db.select().from(repositoryBindings).where(eq(repositoryBindings.projectId, run.projectId));
       await this.runner.onRunFinished(run.id, binding?.localPath ?? null, branchFor(run.id));
     } catch (err) {
@@ -357,18 +401,14 @@ export class WorkflowEngine {
 
   /** 利用者による中止（FR-037）。実行中 Runner は AbortSignal で停止させる */
   async cancelRun(runId: string, reason: string): Promise<RunRow | null> {
-    return this.withRunLock(runId, async () => {
+    let flights: Inflight[] = [];
+    const row = await this.withRunLock(runId, async () => {
       const row = await this.transition(runId, 'cancelled', {
         errorCode: 'CANCELLED_BY_USER',
         errorMessage: reason,
       });
       if (!row) return null;
-      for (const f of this.inflight.values()) {
-        if (f.runId === runId) {
-          f.cancelled = true;
-          f.controller.abort(new StepCancelledError(reason));
-        }
-      }
+      flights = this.abortRunFlights(runId, reason);
       await this.db
         .update(runSteps)
         .set({ status: 'cancelled', finishedAt: new Date() })
@@ -376,6 +416,9 @@ export class WorkflowEngine {
       await this.supersedePendingApprovals(runId);
       return row;
     });
+    // 工程側の終了処理も Run のロックを取るため、待つのはロックの外
+    await this.waitFlights(flights);
+    return row;
   }
 
   /* ------------------------------------------------------------ */
@@ -463,7 +506,9 @@ export class WorkflowEngine {
       .where(and(eq(runSteps.id, stepId), eq(runSteps.status, 'pending')))
       .returning();
     if (!claimed) return;
-    const flight: Inflight = { controller, runId: claimed.runId, cancelled: false };
+    let markDone!: () => void;
+    const done = new Promise<void>((resolve) => (markDone = resolve));
+    const flight: Inflight = { controller, runId: claimed.runId, cancelled: false, done };
     this.inflight.set(stepId, flight);
     let timeout: NodeJS.Timeout | undefined;
     try {
@@ -496,6 +541,7 @@ export class WorkflowEngine {
     } finally {
       clearTimeout(timeout);
       this.inflight.delete(stepId);
+      markDone();
     }
   }
 
@@ -561,6 +607,20 @@ export class WorkflowEngine {
         previous.reviewSummary = o.reviewSummary;
         if (Array.isArray(o.blockers) && o.blockers.length) previous.lastFailure = (o.blockers as string[]).join(' / ');
       }
+      // 実装・レビューの途中で分かった「人が決める必要のあること」は、資料の工程に渡す
+      if ((p.key === 'implement' || p.key === 'review') && o.needsDesignDecision === true && typeof o.designDecision === 'string') {
+        previous.designDecision = o.designDecision;
+      }
+    }
+    // PR・資料コメントの工程には、人が最後に承認した publish の内容を渡す（Runner は承認した head と worktree の HEAD を照合する）
+    if (step.key === 'draft_pr' || step.key === 'update_pr' || step.key === 'post_materials') {
+      const [approved] = await this.db
+        .select({ payload: approvals.payload })
+        .from(approvals)
+        .where(and(eq(approvals.runId, run.id), eq(approvals.actionType, 'publish'), eq(approvals.status, 'approved')))
+        .orderBy(desc(approvals.decidedAt))
+        .limit(1);
+      if (approved) previous.publish = approved.payload;
     }
     return { step: updated, run: current, binding: binding ?? null, agent, previous };
   }
@@ -605,13 +665,14 @@ export class WorkflowEngine {
       title: run.title,
       request: run.request,
       guidance: run.guidance,
+      extraInstruction: run.source.delegateGuidance ?? null,
       repo: binding?.fullName ?? null,
       branch: branchFor(run.id),
       fixLoops: run.fixLoops,
       previous: prepared.previous,
       pr: run.pr ? { number: run.pr.number, url: run.pr.url, branch: run.pr.branch, headSha: run.pr.headSha } : null,
       runtime: run.runtime,
-      localRepo: binding?.localPath ? { path: binding.localPath, testCommand: binding.testCommand } : null,
+      localRepo: binding?.localPath ? { path: binding.localPath, testCommand: binding.testCommand, testImage: binding.testImage } : null,
       remote:
         binding && binding.verification === 'github_app' && binding.cloneUrl && binding.defaultBranch
           ? {
@@ -624,6 +685,7 @@ export class WorkflowEngine {
             }
           : null,
       issueNumber: run.source.type === 'github_issue' ? (run.source.issueNumber ?? null) : null,
+      modeFromComments: run.source.modeFromComments ?? null,
       signal,
       log: async (message, kind = 'log') => {
         assertActive();
@@ -739,6 +801,14 @@ export class WorkflowEngine {
       await this.pauseForUsageLimit(step, run, err);
       return;
     }
+    if (err instanceof RunnerError && err.code === 'BRANCH_DIVERGED') {
+      await this.pauseForBranchDiverged(step, run, err);
+      return;
+    }
+    if (err instanceof PublishStaleError) {
+      await this.reRequestPublish(step, run, err);
+      return;
+    }
     const code =
       err instanceof RunnerError
         ? err.code
@@ -849,21 +919,43 @@ export class WorkflowEngine {
           await this.failRun(run.id, 'INVALID_PLAN', '計画の構造検証に失敗しました');
           return;
         }
+        // 資料に振り分けられるのは GitHub App で接続した Repo の、PR がまだ無い Issue の Run だけ。前の資料の後に人のコメントがあれば実装に進む
+        const materials = o.mode === 'materials' && !run.pr && run.source.modeFromComments !== 'implement' && (await this.materialsAllowed(run));
         const r = await this.transition(run.id, 'running', { plan: parsed.data as PlanJson });
-        if (r) await this.addStep(r, 'implement', 'developer', r.revisionCount);
+        if (r) await (materials ? this.addStep(r, 'materials', 'planner', r.revisionCount) : this.addStep(r, 'implement', 'developer', r.revisionCount));
         return;
       }
       case 'implement': {
+        if (o.needsDesignDecision === true) {
+          await this.switchToMaterials(run, 'developer', String(o.designDecision ?? ''));
+          return;
+        }
         const r = await this.transition(run.id, 'validating');
         if (r) await this.addStep(r, 'test', 'tester', r.revisionCount);
         return;
       }
+      case 'materials': {
+        await this.requestMaterialsPublish(run, o.materials);
+        return;
+      }
+      case 'post_materials': {
+        // 資料をコメントし、needs-human を付けた: 人が会議で決めるのを待つので Run は終える
+        const r = await this.transition(run.id, 'approved');
+        if (r) await this.transition(run.id, 'completed');
+        return;
+      }
       case 'test':
       case 'review': {
+        if (step.key === 'review' && o.needsDesignDecision === true) {
+          await this.switchToMaterials(run, 'reviewer', String(o.designDecision ?? ''));
+          return;
+        }
         const ok = step.key === 'test' ? o.passed === true : o.approved === true;
         if (ok) {
           if (step.key === 'test') await this.addStep(run, 'review', 'reviewer', run.revisionCount);
-          else await this.addStep(run, run.pr ? 'update_pr' : 'draft_pr', 'tool_broker', run.revisionCount);
+          // simulated の Run は何も書かないため、承認を挟まずに PR の工程へ進む
+          else if (run.runtime === 'simulated') await this.addStep(run, run.pr ? 'update_pr' : 'draft_pr', 'tool_broker', run.revisionCount);
+          else await this.requestPublish(run, o.publish);
           return;
         }
         if (run.fixLoops < MAX_FIX_LOOPS) {
@@ -882,7 +974,7 @@ export class WorkflowEngine {
       case 'update_pr': {
         const pr = o.pr as RunPr | undefined;
         if (!pr) {
-          await this.failRun(run.id, 'PR_MISSING', 'Draft PR の結果がありません');
+          await this.failRun(run.id, 'PR_MISSING', 'PR の結果がありません');
           return;
         }
         const r1 = await this.transition(run.id, 'pr_ready', { pr });
@@ -896,7 +988,7 @@ export class WorkflowEngine {
           .orderBy(desc(runSteps.seq));
         const lastTest = prior.find((p) => p.key === 'test');
         const lastImpl = prior.find((p) => p.key === 'implement');
-        await this.createApproval(r2, 'pr_review', 'reviewer', `Draft PR #${pr.number} のレビュー`, {
+        await this.createApproval(r2, 'pr_review', 'reviewer', `PR #${pr.number} のレビュー`, {
           pr,
           revision: r2.revisionCount,
           testsPassed: lastTest?.outcome?.passed ?? null,
@@ -975,11 +1067,13 @@ export class WorkflowEngine {
     });
   }
 
-  /** GitHub で PR が人の手でマージされた: レビュー待ちなら承認済み → 完了にする */
+  /** GitHub で PR が人の手でマージされた: 終端でない状態なら、実行中の工程を止めて承認済み → 完了にする */
   async completeMergedRun(runId: string): Promise<RunRow | null> {
-    return this.withRunLock(runId, async () => {
+    let flights: Inflight[] = [];
+    const result = await this.withRunLock(runId, async () => {
       const [run] = await this.db.select().from(runs).where(eq(runs.id, runId));
-      if (!run || run.status !== 'waiting_review') return null;
+      if (!run || TERMINAL_RUN_STATUSES.includes(run.status)) return null;
+      flights = this.abortRunFlights(runId, 'PR がマージされました');
       const decided = await this.db
         .update(approvals)
         .set({ status: 'approved', version: sql`${approvals.version} + 1`, decidedBy: 'github:merged', decidedAt: new Date(), decisionComment: 'PR がマージされました' })
@@ -988,9 +1082,192 @@ export class WorkflowEngine {
       for (const a of decided) {
         await this.bus.emit(run.workspaceId, 'approval.resolved', { approvalId: a.id, status: a.status, decidedBy: a.decidedBy }, { runId, projectId: run.projectId });
       }
+      await this.db
+        .update(runSteps)
+        .set({ status: 'cancelled', finishedAt: new Date() })
+        .where(and(eq(runSteps.runId, runId), inArray(runSteps.status, ['pending', 'running', 'needs_input'])));
+      // pr_review 以外の未決（確認・利用上限の一時停止など）はマージで意味を失う
+      await this.supersedePendingApprovals(runId);
       const r = await this.transition(runId, 'approved');
       return r ? this.transition(runId, 'completed') : null;
     });
+    // 工程側の終了処理も Run のロックを取るため、待つのはロックの外
+    await this.waitFlights(flights);
+    return result;
+  }
+
+  /**
+   * GitHub に書く前（push・PR の作成と更新の前）に、Run を needs_input にして publish 承認を作る。
+   * 承認するまで PR の工程は足さない。preview は AI レビューが通った時点の worktree から Runner が作る。
+   */
+  private async requestPublish(run: RunRow, preview: unknown) {
+    const p = preview as Partial<PublishPreview> | undefined;
+    if (!p || typeof p.headSha !== 'string' || typeof p.diffSha256 !== 'string' || typeof p.title !== 'string' || typeof p.body !== 'string') {
+      await this.failRun(run.id, 'PUBLISH_PREVIEW_MISSING', 'publish 承認に載せる PR の内容がありません');
+      return;
+    }
+    const update = run.pr !== null;
+    // 承認する差分（diffSha256）と同じ中身の差分の成果物を結び付ける。カードはこの成果物だけを開く（無ければ一致しない旨を出す）
+    const [diffArtifact] = await this.db
+      .select({ id: artifacts.id })
+      .from(artifacts)
+      .where(and(eq(artifacts.workspaceId, run.workspaceId), eq(artifacts.runId, run.id), eq(artifacts.kind, 'diff'), eq(artifacts.checksum, `sha256:${p.diffSha256}`)))
+      .orderBy(desc(artifacts.createdAt))
+      .limit(1);
+    await this.openPublishApproval(run, 'reviewer', update ? `PR #${run.pr!.number} の更新を GitHub に書き込む` : 'PR を GitHub に作る', {
+      kind: 'pull_request',
+      headSha: p.headSha,
+      diffSha256: p.diffSha256,
+      diffArtifactId: diffArtifact?.id ?? null,
+      title: p.title,
+      body: p.body,
+      // 終わりのラベル操作: PR を作るとき（GitHub App の Issue の Run）だけ agents-office を外す。更新では何も変えない
+      // 外すのは承認の後の PR の工程。承認の前には何も変えない
+      labels: { remove: !update && (await this.materialsAllowed(run)) ? [AGENTS_OFFICE_LABEL] : [], add: [] as string[] },
+      update,
+    });
+  }
+
+  /**
+   * 資料コメントを Issue に書く前に、Run を needs_input にして publish 承認（kind: 'materials'）を作る。
+   * 承認するまで post_materials の工程は足さない。終わりのラベル操作（agents-office を外し needs-human を付ける）と、
+   * 着手時に自分をアサインしていたならその取り外しも、承認する内容に含める
+   */
+  private async requestMaterialsPublish(run: RunRow, preview: unknown) {
+    const p = preview as Partial<MaterialsPreview> | undefined;
+    const issue = run.source.issueNumber;
+    if (!p || typeof p.comment !== 'string' || !p.comment.trim() || !issue) {
+      await this.failRun(run.id, 'PUBLISH_PREVIEW_MISSING', 'publish 承認に載せる資料がありません');
+      return;
+    }
+    await this.openPublishApproval(run, 'planner', `Issue #${issue} に判断材料をコメントする`, {
+      kind: 'materials',
+      comment: p.comment,
+      labels: { remove: [AGENTS_OFFICE_LABEL], add: [NEEDS_HUMAN_LABEL] },
+      unassign: run.source.assignedBySelf === true,
+    });
+  }
+
+  /** publish 承認を作り、Run を needs_input にする（既に未決の publish 承認があればそれを使う） */
+  private async openPublishApproval(run: RunRow, role: AgentRole, title: string, payload: Record<string, unknown>) {
+    // 遷移の前に未決の承認を確かめる（createApproval は未決があると何もしないため、判断できない needs_input で止まらないようにする）
+    const pending = await this.db
+      .select({ actionType: approvals.actionType })
+      .from(approvals)
+      .where(and(eq(approvals.runId, run.id), eq(approvals.status, 'pending')));
+    if (pending.some((a) => a.actionType === 'publish')) {
+      // 既に publish 承認を待っている（復旧処理の再入など）: それを使う
+      await this.transition(run.id, 'needs_input');
+      return;
+    }
+    // それ以外の未決は、前の状態のもので意味を失っている。残すと新しい publish 承認が作られない
+    if (pending.length > 0) await this.supersedePendingApprovals(run.id);
+    const r = await this.transition(run.id, 'needs_input');
+    if (!r) return;
+    await this.createApproval(r, 'publish', role, title, payload);
+  }
+
+  /**
+   * 資料モードにできる Run か: Claude で実行する、GitHub App で接続した Repo の Issue の Run。
+   * ローカル・シミュレーターの Repo や Issue の無い Run には、資料を書く先が無い
+   */
+  private async materialsAllowed(run: RunRow): Promise<boolean> {
+    if (run.runtime === 'simulated') return false;
+    if (run.source.type !== 'github_issue' || !run.source.issueNumber) return false;
+    const [binding] = await this.db
+      .select({ verification: repositoryBindings.verification })
+      .from(repositoryBindings)
+      .where(eq(repositoryBindings.projectId, run.projectId));
+    return binding?.verification === 'github_app';
+  }
+
+  /**
+   * 実装・レビューの途中で設計の判断が要ると分かった（変更は Runner が捨て済み）。
+   *  - 資料モードにできる Run（PR がまだ無い GitHub App の Issue）: 資料の工程へ切り替える
+   *  - PR のある Run・Issue の無い Run: 書く先の資料が無い（PR は人がレビュー中）ので、needs_input で人の判断を待つ
+   */
+  private async switchToMaterials(run: RunRow, role: 'developer' | 'reviewer', decision: string) {
+    if (run.pr || !(await this.materialsAllowed(run))) {
+      const r = await this.transition(run.id, 'needs_input');
+      if (!r) return;
+      await this.createApproval(r, 'clarification', role, '設計の判断が必要です', {
+        reason: 'needs_design_decision',
+        questions: [decision || '設計の判断が必要です'],
+        requestExcerpt: run.request.slice(0, 600),
+        ...(run.pr ? { pr: run.pr } : {}),
+        note: '決めた方針をコメントに書いて差し戻すと、その内容を踏まえて再計画します。中止すると Run を終了します。',
+      });
+      return;
+    }
+    const r = await this.transition(run.id, 'running');
+    if (r) await this.addStep(r, 'materials', 'planner', r.revisionCount);
+  }
+
+  /**
+   * 承認した head と worktree の HEAD が違った PR の工程を終え、今の HEAD でテスト → AI レビューからやり直す。
+   * レビューが通れば既存の流れで publish 承認を作り直すので、人はテストと AI レビューを通った head だけを承認する。Run は失敗にしない
+   */
+  private async reRequestPublish(step: StepRow, run: RunRow, err: PublishStaleError) {
+    const now = new Date();
+    await this.db.insert(stepLogs).values({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: step.id,
+      kind: 'error',
+      message: `${err.code}: ${err.message} — push せず、テストと AI レビューからやり直します`,
+    });
+    await this.db
+      .update(runSteps)
+      .set({ status: 'cancelled', errorCode: err.code, summary: err.message.slice(0, 300), finishedAt: now })
+      .where(eq(runSteps.id, step.id));
+    await this.bus.emit(
+      run.workspaceId,
+      'step.finished',
+      { stepId: step.id, key: step.key, role: step.role, status: 'cancelled', errorCode: err.code },
+      { runId: run.id, projectId: run.projectId },
+    );
+    const [cur] = await this.db.select().from(runs).where(eq(runs.id, run.id));
+    if (!cur || cur.status !== 'validating') return;
+    await this.addStep(cur, 'test', 'tester', cur.revisionCount);
+  }
+
+  /**
+   * publish 承認の判断を反映する（却下＝中止は呼び出し側が cancelRun で行う）。
+   *  - 承認: validating に戻し、PR の工程（draft_pr / update_pr）を足す
+   *  - 差し戻し: コメントを指示として running にし、implement からやり直す（AI レビュー → publish 承認をもう一度通る）
+   */
+  async resumeAfterPublish(
+    runId: string,
+    decision: 'approve' | 'request_changes',
+    comment: string | null,
+    kind: 'pull_request' | 'materials' = 'pull_request',
+  ): Promise<RunRow | null> {
+    const [cur] = await this.db.select().from(runs).where(eq(runs.id, runId));
+    if (!cur || cur.status !== 'needs_input') return null;
+    if (kind === 'materials') {
+      // 資料: 承認で Issue へのコメントとラベル操作の工程へ、差し戻しでコメントを指示にして資料を作り直す（コードは変えない）
+      if (decision === 'approve') {
+        const r = await this.transition(runId, 'running');
+        if (r) await this.addStep(r, 'post_materials', 'tool_broker', r.revisionCount);
+        return r;
+      }
+      const r = await this.transition(runId, 'running', { guidance: comment?.slice(0, 2000) || '人の差し戻しへの対応' });
+      if (r) await this.addStep(r, 'materials', 'planner', r.revisionCount);
+      return r;
+    }
+    if (decision === 'approve') {
+      const r = await this.transition(runId, 'validating');
+      if (r) await this.addStep(r, r.pr ? 'update_pr' : 'draft_pr', 'tool_broker', r.revisionCount);
+      return r;
+    }
+    // 人の差し戻しは修正サイクルとして数える（Developer への指示に revision を付けて渡すため）
+    const r = await this.transition(runId, 'running', {
+      guidance: comment?.slice(0, 2000) || '人の差し戻しへの対応',
+      revisionCount: cur.revisionCount + 1,
+      fixLoops: 0,
+    });
+    if (r) await this.addStep(r, 'implement', 'developer', r.revisionCount);
+    return r;
   }
 
   /** needs_input からの再開（人の判断: 承認 / 差し戻し）。計画からやり直す */
@@ -1015,6 +1292,26 @@ export class WorkflowEngine {
    * 失敗にはせず、人の「続行」でその工程から再開できるようにする（利用者の要望）。
    */
   private async pauseForUsageLimit(step: StepRow, run: RunRow, err: UsageLimitError) {
+    await this.pauseStep(step, run, err, 'Claude の利用上限に達したため一時停止', {
+      reason: 'usage_limit',
+      resetsAt: err.resetsAt,
+      note: '上限がリセットされた後に「続行」を押すと、止まった工程から再開します。差し戻すとコメントを踏まえて計画からやり直し、却下すると Run を中止します。',
+    });
+  }
+
+  /**
+   * ai/ ブランチが GitHub 側（人のコミット）と分岐した工程を一時停止し、Run を needs_input にする。
+   * 自動では解消せず（強制 push も merge もしない）、人の判断を待つ。
+   */
+  private async pauseForBranchDiverged(step: StepRow, run: RunRow, err: RunnerError) {
+    await this.pauseStep(step, run, err, 'ブランチが GitHub 側と分岐しています', {
+      reason: 'branch_diverged',
+      note: 'GitHub 上の ai/ ブランチと Run の履歴が分岐しています。GitHub 側を Run の履歴から早送りできる形に直してから「続行」を押すと、同じ工程から再開します。差し戻すとコメントを踏まえて計画からやり直し、却下すると Run を中止します。',
+    });
+  }
+
+  /** 工程を一時停止（needs_input）にして、判断待ちの clarification 承認を作る。失敗にはしない */
+  private async pauseStep(step: StepRow, run: RunRow, err: { code: string; message: string }, title: string, extra: Record<string, unknown>) {
     const now = new Date();
     await this.db.insert(stepLogs).values({
       workspaceId: run.workspaceId,
@@ -1039,13 +1336,11 @@ export class WorkflowEngine {
       { stepId: step.id, key: step.key, role: step.role, status: 'needs_input', errorCode: err.code },
       { runId: run.id, projectId: run.projectId },
     );
-    await this.createApproval(r, 'clarification', step.role === 'tool_broker' ? 'planner' : step.role, 'Claude の利用上限に達したため一時停止', {
-      reason: 'usage_limit',
+    await this.createApproval(r, 'clarification', step.role === 'tool_broker' ? 'planner' : step.role, title, {
+      ...extra,
       pausedStepId: step.id,
       stepKey: step.key,
-      resetsAt: err.resetsAt,
       message: err.message,
-      note: '上限がリセットされた後に「続行」を押すと、止まった工程から再開します。差し戻すとコメントを踏まえて計画からやり直し、却下すると Run を中止します。',
     });
   }
 

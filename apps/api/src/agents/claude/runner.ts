@@ -9,27 +9,70 @@
  *  - Planner / Reviewer: 構造化出力で計画とレビュー結果を JSON で受け取る
  *  - Developer: Run ごとの隔離 worktree でファイルを変更。終了後に変更パスを検査し、禁止パスへの変更があれば破棄
  *  - Tester: 利用者が Project に設定したコマンドだけを worktree で実行（シェルは使わない）
- *  - Draft PR: ローカル版は worktree のブランチを PR とみなす（GitHub への push は未接続）
+ *  - PR: 人の publish 承認の後にだけ push・PR 作成を行う。承認した head と worktree の HEAD が違えば何もしない
+ *    （GitHub App 連携のない Repo は worktree のブランチを PR とみなす）
+ *  - 資料モード: 人が決める Issue は、コードを変えずに判断材料（Markdown）を書き、publish 承認の後に Issue コメントにする
  *
  * 依頼本文・Issue・リポジトリ内容は非信頼入力として扱い、ツールポリシーは変更しない（基本設計書 9.3）。
  */
-import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { lstat, readFile } from 'node:fs/promises';
 import { PATTERNS, detectDangerous } from '@paw/sim-content';
-import type { AgentRunner, StepExecutionContext, StepOutput } from '../runner';
-import { RunnerError } from '../runner';
-import { changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, run, safeEnv, worktreeExists } from './git';
+import type { AgentRunner, MaterialsPreview, PublishPreview, StepExecutionContext, StepOutput } from '../runner';
+import { PublishStaleError, RunnerError } from '../runner';
+import { sha256Hex } from '../../lib/crypto';
+import { assertGitLink, changedPaths, commitAll, confine, diffFromBase, discardChanges, ensureWorktree, headSha, listFiles, removeWorktree, resetToBase, worktreeExists, type Worktree } from './git';
 import type { RemoteRepoHost } from '../../github/repoHost';
 import type { ModelBackend } from './shared';
-import { DEVELOPER_SYSTEM, PLANNER_SYSTEM, PlanOutput, REVIEWER_SYSTEM, ReviewOutput, bullet } from './shared';
+import type { TestSandbox } from './testSandbox';
+import { DEVELOPER_SYSTEM, MATERIALS_SYSTEM, MaterialsOutput, PLANNER_SYSTEM, PlanOutput, REVIEWER_SYSTEM, ReviewOutput, bullet } from './shared';
+import { designDecisionOf, materialsCommentBody, validateMaterials } from './materials';
 
 const MAX_DIFF_FOR_REVIEW = 200 * 1024;
+
+/** PR 本文・成果物に書くテスト結果の 1 行 */
+function testsLineOf(previous: Record<string, unknown>): string {
+  if (previous.testsSkipped) return '未実行（コマンド未設定）';
+  return previous.testsPassed === false ? '✗ 失敗' : '✓ 通過';
+}
+
+/**
+ * GitHub に出す PR の本文（副作用なし）。publish 承認で人に見せる本文と、承認後に PR へ書く本文は同じものを使う。
+ * 1 行目は Issue のある Run だけ `Closes #<番号>`。
+ */
+export function buildPullRequestBody(args: {
+  issueNumber: number | null;
+  developerSummary: string;
+  reviewSummary: string;
+  testsLine: string;
+  filesChanged: number;
+  runId: string;
+}): string {
+  return [
+    ...(args.issueNumber ? [`Closes #${args.issueNumber}`, ''] : []),
+    '## 内容',
+    '',
+    args.developerSummary,
+    '',
+    '## AI レビュー',
+    '',
+    args.reviewSummary,
+    '',
+    `- テスト: ${args.testsLine}`,
+    `- 変更: ${args.filesChanged} ファイル`,
+    '',
+    '---',
+    `Run \`${args.runId}\``,
+    'この PR は agents-office が作りました。マージは人が行います。',
+  ].join('\n');
+}
 
 export interface ClaudeRunnerOptions {
   worktreesDir: string;
   testTimeoutMs: number;
+  /** Tester の実行場所（サーバーモードは Docker コンテナ） */
+  testSandbox: TestSandbox;
   backend: ModelBackend;
-  /** GitHub App 連携（管理クローンの取得・push・Draft PR）。未設定ならローカルリポジトリのみ */
+  /** GitHub App 連携（管理クローンの取得・push・PR）。未設定ならローカルリポジトリのみ */
   remoteHost?: RemoteRepoHost | null;
 }
 
@@ -54,6 +97,8 @@ export class ClaudeRunner implements AgentRunner {
 
   private async executeInner(ctx: StepExecutionContext): Promise<StepOutput> {
     if (!ctx.localRepo) throw new RunnerError('Claude 実行にはローカルリポジトリの設定が必要です', 'LOCAL_REPO_MISSING', false);
+    // Issue への書き込みだけの工程なので、作業コピーは使わない
+    if (ctx.key === 'post_materials') return this.postMaterials(ctx);
     let baseRef: string | undefined;
     if (ctx.remote) {
       if (!this.opts.remoteHost) throw new RunnerError('GitHub App が設定されていないため、このリポジトリでは実行できません', 'GITHUB_APP_UNAVAILABLE', false);
@@ -63,16 +108,18 @@ export class ClaudeRunner implements AgentRunner {
     const wt = await ensureWorktree(ctx.localRepo.path, this.opts.worktreesDir, ctx.runId, ctx.branch, ctx.signal, baseRef);
     switch (ctx.key) {
       case 'plan':
-        return this.plan(ctx, wt.path);
+        return this.plan(ctx, wt);
       case 'implement':
-        return this.implement(ctx, wt.path, wt.baseSha);
+        return this.implement(ctx, wt);
       case 'test':
-        return this.test(ctx, wt.path);
+        return this.test(ctx, wt);
       case 'review':
-        return this.review(ctx, wt.path, wt.baseSha);
+        return this.review(ctx, wt);
       case 'draft_pr':
       case 'update_pr':
-        return this.pullRequest(ctx, wt.path, wt.baseSha);
+        return this.pullRequest(ctx, wt);
+      case 'materials':
+        return this.materials(ctx, wt);
     }
   }
 
@@ -84,12 +131,15 @@ export class ClaudeRunner implements AgentRunner {
 
   /* ---------------------------------------------------------------- */
 
-  private async repoContext(worktree: string) {
-    const files = await listFiles(worktree);
+  private async repoContext(wt: Worktree) {
+    const worktree = wt.path;
+    const files = await listFiles(wt);
     const shown = files.slice(0, 400);
     let readme = '';
     for (const name of ['README.md', 'readme.md', 'README']) {
-      if (existsSync(`${worktree}/${name}`)) {
+      // 通常のファイルだけ読む（リポジトリ内のリンクで worktree の外のファイルをプロンプトに入れないため）
+      const st = await lstat(`${worktree}/${name}`).catch(() => null);
+      if (st?.isFile()) {
         readme = (await readFile(`${worktree}/${name}`, 'utf8')).slice(0, 8000);
         break;
       }
@@ -101,25 +151,31 @@ export class ClaudeRunner implements AgentRunner {
     ].join('\n');
   }
 
-  private async plan(ctx: StepExecutionContext, worktree: string): Promise<StepOutput> {
+  private async plan(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    const worktree = wt.path;
     await ctx.log(`${this.backend.label}で計画を作成 — 依頼本文は非信頼入力として扱う`);
     await ctx.tool('issue.read', {}, '依頼内容を取得');
     await ctx.tool('repo.read', { repo: ctx.repo }, 'リポジトリ構造を参照');
-    const context = await this.repoContext(worktree);
+    const context = await this.repoContext(wt);
     const { output: plan, model } = await this.backend.structured(ctx, {
       purpose: 'plan',
       schema: PlanOutput,
       system: PLANNER_SYSTEM,
       worktree,
+      gitDir: wt.gitDir,
       user: [
         `<untrusted_request>\nタイトル: ${ctx.title}\n\n${ctx.request}\n</untrusted_request>`,
         ctx.guidance ? `人からの追加指示（信頼できる指示）: ${ctx.guidance}` : '',
+        ctx.extraInstruction ? `任せるときの追加指示（信頼できる指示）: ${ctx.extraInstruction}` : '',
         `<repository_context>\n${context}\n</repository_context>`,
       ]
         .filter(Boolean)
         .join('\n\n'),
     });
 
+    // 資料に振り分けられるのは GitHub App で接続した Repo の、PR がまだ無い Issue の Run だけ。前の資料の後に人のコメントがあれば実装に進む
+    const materialsAllowed = Boolean(ctx.remote && ctx.issueNumber) && !ctx.pr && ctx.modeFromComments !== 'implement';
+    const mode: 'implement' | 'materials' = plan.mode === 'materials' && materialsAllowed ? 'materials' : 'implement';
     // 危険操作の判定はモデルの出力だけに頼らず、プログラムの検査も併用する（NFR-009）
     const detected = Array.from(new Set([...detectDangerous(`${ctx.title}\n${ctx.request}`), ...plan.dangerous_operations]));
     const flags: string[] = [];
@@ -132,7 +188,8 @@ export class ClaudeRunner implements AgentRunner {
         outcome: { needsInput: true, reason: 'dangerous_operation', detected, questions: plan.questions.length ? plan.questions : ['危険な操作を除外した安全な範囲で進めてよいですか？'] },
       };
     }
-    if (!ctx.guidance && plan.needs_human_decision && plan.questions.length > 0) {
+    // 資料は人が決めるための材料なので、要件の曖昧さでは止めない（曖昧さは会議で確かめる問いになる）
+    if (!ctx.guidance && mode === 'implement' && plan.needs_human_decision && plan.questions.length > 0) {
       await ctx.log('要件が曖昧なため判断を求めます', 'error');
       return {
         status: 'succeeded',
@@ -140,13 +197,24 @@ export class ClaudeRunner implements AgentRunner {
         outcome: { needsInput: true, reason: 'clarification', questions: plan.questions, detected: [] },
       };
     }
-    const steps = [
-      { id: 'plan', role: 'planner' as const, dependsOn: [] },
-      { id: 'implement', role: 'developer' as const, dependsOn: ['plan'] },
-      { id: 'test', role: 'tester' as const, dependsOn: ['implement'] },
-      { id: 'review', role: 'reviewer' as const, dependsOn: ['test'] },
-      { id: 'draft_pr', role: 'tool_broker' as const, dependsOn: ['review'] },
-    ];
+    const steps =
+      mode === 'materials'
+        ? [
+            { id: 'plan', role: 'planner' as const, dependsOn: [] },
+            { id: 'materials', role: 'planner' as const, dependsOn: ['plan'] },
+            { id: 'post_materials', role: 'tool_broker' as const, dependsOn: ['materials'] },
+          ]
+        : [
+            { id: 'plan', role: 'planner' as const, dependsOn: [] },
+            { id: 'implement', role: 'developer' as const, dependsOn: ['plan'] },
+            { id: 'test', role: 'tester' as const, dependsOn: ['implement'] },
+            { id: 'review', role: 'reviewer' as const, dependsOn: ['test'] },
+            { id: 'draft_pr', role: 'tool_broker' as const, dependsOn: ['review'] },
+          ];
+    const modeNote =
+      plan.mode === 'materials' && mode === 'implement'
+        ? `${plan.mode_reason}（${ctx.pr ? 'PR を出した後の Run のため実装として進めます' : ctx.modeFromComments === 'implement' ? '前の資料の後に人のコメントがあるため実装として進めます' : 'GitHub の Issue の無い Run のため実装として進めます'}）`
+        : plan.mode_reason;
     const md = [
       `# 実行計画 — ${ctx.title}`,
       '',
@@ -156,7 +224,12 @@ export class ClaudeRunner implements AgentRunner {
       '',
       plan.summary,
       '',
+      '## 振り分け',
+      '',
+      `${mode === 'materials' ? '資料（コードは変えず、判断材料を Issue コメントに書く）' : '実装'} — ${modeNote}`,
+      '',
       ...(ctx.guidance ? ['## 人からの追加指示', '', `> ${ctx.guidance}`, ''] : []),
+      ...(ctx.extraInstruction ? ['## 任せるときの追加指示', '', `> ${ctx.extraInstruction}`, ''] : []),
       '## 進め方',
       '',
       ...plan.approach.map((a, i) => `${i + 1}. ${a}`),
@@ -185,14 +258,18 @@ export class ClaudeRunner implements AgentRunner {
     return {
       status: 'succeeded',
       summary: plan.summary.slice(0, 200),
-      outcome: { plan: { steps, maxRevisionAttempts: 3, summary: plan.summary.slice(0, 500), flags }, detail: plan },
+      outcome: { plan: { steps, maxRevisionAttempts: 3, summary: plan.summary.slice(0, 500), flags }, detail: plan, mode },
     };
   }
 
-  private async implement(ctx: StepExecutionContext, worktree: string, baseSha: string): Promise<StepOutput> {
+  private async implement(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    const worktree = wt.path;
     await ctx.tool('worktree.write', { branch: ctx.branch }, `隔離 worktree で作業: ${ctx.branch}`);
+    // 修正の前に（再開・再試行でも）、人が ai/ ブランチへ足したコミットを取り込む（取り込まずに push すると non-fast-forward になる）
+    if (ctx.remote && this.opts.remoteHost) await this.opts.remoteHost.syncBranch(ctx, wt, ctx.remote, ctx.branch);
     const detail = ctx.previous.planDetail as PlanOutput | undefined;
     const feedback = [
+      ctx.extraInstruction ? `任せるときの追加指示（信頼できる指示）: ${ctx.extraInstruction}` : '',
       ctx.revision > 0 && ctx.guidance ? `PR レビューでの指摘（revision ${ctx.revision}）: ${ctx.guidance}` : '',
       ctx.previous.lastFailure ? `前回の検証で見つかった問題: ${String(ctx.previous.lastFailure)}` : '',
     ]
@@ -201,6 +278,7 @@ export class ClaudeRunner implements AgentRunner {
     const { summary } = await this.backend.develop(ctx, {
       system: DEVELOPER_SYSTEM,
       worktree,
+      gitDir: wt.gitDir,
       user: [
         `<untrusted_request>\nタイトル: ${ctx.title}\n\n${ctx.request}\n</untrusted_request>`,
         detail
@@ -212,10 +290,14 @@ export class ClaudeRunner implements AgentRunner {
         .filter(Boolean)
         .join('\n\n'),
     });
-    await this.verifyChanges(ctx, worktree);
-    const sha = await commitAll(worktree, `${ctx.title}\n\nrun: ${ctx.runId} (revision ${ctx.revision})`);
+    // AI が作業ツリーの .git を書き換えていないことを確かめてから、git 操作に進む
+    await assertGitLink(wt);
+    const decision = designDecisionOf(summary);
+    if (decision) return this.stopForDesignDecision(ctx, wt, decision, `Developer: ${decision}`);
+    await this.verifyChanges(ctx, wt);
+    const sha = await commitAll(wt, `${ctx.title}\n\nrun: ${ctx.runId} (revision ${ctx.revision})`);
     await ctx.log(sha ? `コミット作成: ${sha.slice(0, 7)} on ${ctx.branch}` : '変更はありませんでした', sha ? 'log' : 'error');
-    const diff = await diffFromBase(worktree, baseSha);
+    const diff = await diffFromBase(wt, wt.baseSha);
     const additions = diff.files.reduce((a, f) => a + f.additions, 0);
     const deletions = diff.files.reduce((a, f) => a + f.deletions, 0);
     await ctx.artifact('diff', `差分（revision ${ctx.revision}）`, 'changes.diff', 'text/x-diff', diff.patch || '# 変更なし\n');
@@ -231,20 +313,22 @@ export class ClaudeRunner implements AgentRunner {
    * Claude Code のように外部プロセスがファイルを書いた場合でも、CI 設定・git フック・秘密値・
    * AI エージェント設定・worktree 外を指すリンクへの変更は取り込まない。
    */
-  private async verifyChanges(ctx: StepExecutionContext, worktree: string) {
-    const paths = await changedPaths(worktree);
+  private async verifyChanges(ctx: StepExecutionContext, wt: Worktree) {
+    const worktree = wt.path;
+    const paths = await changedPaths(wt);
     const violations: string[] = [];
     for (const p of paths) {
       const c = confine(worktree, p);
       if (!c.ok) violations.push(`${p}（${c.reason}）`);
     }
     if (violations.length === 0) return;
-    await discardChanges(worktree);
+    await discardChanges(wt);
     await ctx.log(`禁止されたパスへの変更を検出したため、この試行の変更をすべて破棄しました: ${violations.slice(0, 5).join(' / ')}`, 'error');
     throw new RunnerError(`禁止されたパスへの変更を検出しました: ${violations.slice(0, 5).join(' / ')}`, 'FORBIDDEN_CHANGE', false);
   }
 
-  private async test(ctx: StepExecutionContext, worktree: string): Promise<StepOutput> {
+  private async test(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    const worktree = wt.path;
     const command = ctx.localRepo?.testCommand?.trim();
     if (!command) {
       await ctx.log('テストコマンドが未設定のため実行しません（Projects でテストコマンドを設定できます）', 'error');
@@ -263,7 +347,16 @@ export class ClaudeRunner implements AgentRunner {
         results.push({ command: c, exitCode: -1, timedOut: false, output: decision.reason });
         break;
       }
-      const r = await run(bin, args, { cwd: worktree, timeoutMs: this.opts.testTimeoutMs, signal: ctx.signal, env: safeEnv({ CI: '1' }) });
+      const r = await this.opts.testSandbox.exec(bin, args, {
+        worktree,
+        timeoutMs: this.opts.testTimeoutMs,
+        signal: ctx.signal,
+        image: ctx.localRepo?.testImage ?? null,
+        runId: ctx.runId,
+        attempt: ctx.attempt,
+      });
+      // コンテナ内のコードは /work/.git を書き換えられる。以降の git 操作の前に、記録した中身と一致するか確かめる
+      await assertGitLink(wt);
       const output = `${r.stdout}\n${r.stderr}`.trim();
       results.push({ command: c, exitCode: r.code, timedOut: r.timedOut, output: output.slice(-20_000) });
       await ctx.log(`${r.code === 0 ? '✓' : '✗'} ${c}（exit ${r.code}${r.timedOut ? '・タイムアウト' : ''}）`, r.code === 0 ? 'log' : 'error');
@@ -272,6 +365,9 @@ export class ClaudeRunner implements AgentRunner {
         break;
       }
     }
+    // テストが作業コピーに残したもの（生成物・CLAUDE.md など）を次の工程に渡さない。
+    // 渡すと Reviewer・Developer のプロンプトに入り、次の commitAll で PR にも入る。.git は各実行の後に確かめ済み
+    await discardChanges(wt, { ignored: true });
     const failedOutput = results.find((r) => r.exitCode !== 0)?.output ?? null;
     await ctx.artifact(
       'test_report',
@@ -287,10 +383,11 @@ export class ClaudeRunner implements AgentRunner {
     };
   }
 
-  private async review(ctx: StepExecutionContext, worktree: string, baseSha: string): Promise<StepOutput> {
+  private async review(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    const worktree = wt.path;
     await ctx.tool('diff.read', {}, '差分を取得');
     await ctx.tool('ci.read', {}, 'テスト結果を確認');
-    const diff = await diffFromBase(worktree, baseSha);
+    const diff = await diffFromBase(wt, wt.baseSha);
     const truncated = diff.patch.length > MAX_DIFF_FOR_REVIEW;
     if (truncated) await ctx.log(`差分が大きいため先頭 ${MAX_DIFF_FOR_REVIEW / 1024}KB のみレビュー対象にします`, 'error');
     const detail = ctx.previous.planDetail as PlanOutput | undefined;
@@ -299,6 +396,7 @@ export class ClaudeRunner implements AgentRunner {
       schema: ReviewOutput,
       system: REVIEWER_SYSTEM,
       worktree,
+      gitDir: wt.gitDir,
       user: [
         `<untrusted_request>\nタイトル: ${ctx.title}\n\n${ctx.request}\n</untrusted_request>`,
         detail ? `受入条件:\n${bullet(detail.acceptance_criteria)}` : '',
@@ -309,7 +407,8 @@ export class ClaudeRunner implements AgentRunner {
         .join('\n\n'),
     });
     const blockers = diff.files.length === 0 ? ['変更がありません', ...review.blockers] : review.blockers;
-    const approved = review.verdict === 'ready_for_draft_pr' && blockers.length === 0;
+    const needsDesignDecision = review.needs_design_decision === true;
+    const approved = !needsDesignDecision && review.verdict === 'ready_for_draft_pr' && blockers.length === 0;
     const md = [
       `# レビュー結果 — ${ctx.title}`,
       '',
@@ -329,68 +428,234 @@ export class ClaudeRunner implements AgentRunner {
       '',
       '## 判定',
       '',
-      approved ? 'Draft PR として提出可能です。マージ可否は人間がレビューで判断します。' : '修正が必要です。Developer に差し戻します。',
+      needsDesignDecision
+        ? '人が決める設計の判断が必要です。変更を捨てて、判断材料を書く工程に切り替えます。'
+        : approved
+          ? 'PR として提出可能です。マージ可否は人間がレビューで判断します。'
+          : '修正が必要です。Developer に差し戻します。',
       '',
     ].join('\n');
     await ctx.tool('review.write', {}, approved ? `指摘: blocker 0 / nit ${review.nits.length}` : `blocker ${blockers.length} 件`);
     await ctx.artifact('review', 'AI レビュー', 'review.md', 'text/markdown', md);
+    if (needsDesignDecision) return this.stopForDesignDecision(ctx, wt, review.summary, `Reviewer: ${review.summary}`);
+    // 通ったときは、エンジンが publish 承認に載せる PR の中身（head・差分のハッシュ・タイトル・本文）を返す
+    const publish = approved ? await this.publishPreview(ctx, wt, review.summary) : undefined;
     return {
       status: 'succeeded',
-      summary: approved ? 'Draft PR 提出可（人間の承認ではない）' : `blocker ${blockers.length} 件（差し戻し）`,
-      outcome: { approved, blockers, nits: review.nits, reviewSummary: review.summary },
+      summary: approved ? 'PR 提出可（人間の承認ではない）' : `blocker ${blockers.length} 件（差し戻し）`,
+      outcome: { approved, blockers, nits: review.nits, reviewSummary: review.summary, ...(publish ? { publish } : {}) },
     };
   }
 
-  private async pullRequest(ctx: StepExecutionContext, worktree: string, baseSha: string): Promise<StepOutput> {
+  /** 今の worktree（HEAD・base からの差分）から、publish 承認で人に見せる PR の中身を作る */
+  private async publishPreview(ctx: StepExecutionContext, wt: Worktree, reviewSummary: string): Promise<PublishPreview> {
+    const diff = await diffFromBase(wt, wt.baseSha);
+    // 承認で人に見せる差分そのもの（ハッシュを取る patch）を成果物に残す。implement を通らず HEAD が動いた場合でも、承認カードで差分を開けるようにする
+    await ctx.artifact('diff', '差分（承認する内容）', 'publish.diff', 'text/x-diff', diff.patch);
+    return {
+      headSha: await headSha(wt),
+      diffSha256: sha256Hex(diff.patch),
+      title: ctx.title,
+      body: buildPullRequestBody({
+        issueNumber: ctx.issueNumber,
+        developerSummary: String(ctx.previous.developerSummary ?? ctx.title),
+        reviewSummary,
+        testsLine: testsLineOf(ctx.previous),
+        filesChanged: diff.files.length,
+        runId: ctx.runId,
+      }),
+    };
+  }
+
+  /**
+   * 設計の判断が要ると分かった: この Run の変更を捨て、判断を待つ結果を返す（次をどうするかはエンジンが決める）。
+   * まだ GitHub に出していない Run は起点まで戻す（資料の「現状」を AI の途中の変更で書かないため）。
+   * PR のある Run は push 済みの履歴を消さず、未コミットの変更だけを捨てる
+   */
+  private async stopForDesignDecision(ctx: StepExecutionContext, wt: Worktree, decision: string, summary: string): Promise<StepOutput> {
+    // git 操作は記録した gitDir で行う（作業ツリーの .git は信用しない）
+    await assertGitLink(wt);
+    if (ctx.pr) await discardChanges(wt);
+    else await resetToBase(wt);
+    await ctx.log(`設計の判断が必要: ${decision.slice(0, 300)} — この Run の変更を捨てました`, 'error');
+    return {
+      status: 'succeeded',
+      summary: `設計の判断が必要 — ${summary.slice(0, 200)}`,
+      outcome: { needsDesignDecision: true, designDecision: decision.slice(0, 2000) },
+    };
+  }
+
+  /**
+   * 資料の工程: 人が話して決める内容について、コードを変えずに判断材料を書く（読み取り専用）。
+   * 形式に合わなければ問題を伝えて 1 回だけ作り直させ、それでも駄目なら失敗にする。
+   * 書いた本文は publish 承認で人に見せ、承認の後に post_materials が Issue コメントにする
+   */
+  private async materials(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    await ctx.log(`${this.backend.label}で判断材料を作成 — コードは変えません`);
+    await ctx.tool('issue.read', {}, '依頼内容を取得');
+    await ctx.tool('repo.read', { repo: ctx.repo }, 'リポジトリ構造を参照');
+    const context = await this.repoContext(wt);
+    const detail = ctx.previous.planDetail as PlanOutput | undefined;
+    const designDecision = typeof ctx.previous.designDecision === 'string' ? ctx.previous.designDecision : null;
+    const base = [
+      `<untrusted_request>\nタイトル: ${ctx.title}\n\n${ctx.request}\n</untrusted_request>`,
+      ctx.extraInstruction ? `任せるときの追加指示（信頼できる指示）: ${ctx.extraInstruction}` : '',
+      ctx.guidance ? `人からの指示（信頼できる指示。前の資料への差し戻しを含む）: ${ctx.guidance}` : '',
+      designDecision
+        ? `実装の途中で分かった、人が決める必要のあること（AI の報告）: ${designDecision}`
+        : detail?.mode_reason
+          ? `資料に振り分けた理由（Planner）: ${detail.mode_reason}`
+          : '',
+      `<repository_context>\n${context}\n</repository_context>`,
+    ];
+    let markdown = '';
+    let problems: string[] = [];
+    let model = '';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await this.backend.structured(ctx, {
+        purpose: 'materials',
+        schema: MaterialsOutput,
+        system: MATERIALS_SYSTEM,
+        worktree: wt.path,
+        gitDir: wt.gitDir,
+        user: [
+          ...base,
+          problems.length ? `前回の資料は次の点で形式に合いませんでした。直して書き直してください:\n${bullet(problems)}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+      });
+      model = res.model;
+      markdown = res.output.markdown.trim();
+      problems = validateMaterials(markdown);
+      if (problems.length === 0) break;
+      await ctx.log(`資料の形式が合いません: ${problems.join(' / ')}${attempt === 0 ? ' — 1 回だけ作り直します' : ''}`, 'error');
+    }
+    if (problems.length > 0) {
+      return { status: 'failed', summary: `資料の形式が合いません: ${problems.join(' / ').slice(0, 250)}`, outcome: { problems }, errorCode: 'MATERIALS_INVALID' };
+    }
+    const comment = materialsCommentBody(markdown, ctx.runId);
+    await ctx.tool('plan.write', {}, '判断材料を保存');
+    await ctx.artifact('materials', '判断材料（Issue コメント案）', 'materials.md', 'text/markdown', comment);
+    const materials: MaterialsPreview = { comment };
+    return { status: 'succeeded', summary: `判断材料を作成（${this.backend.label}・${model}）`, outcome: { materials } };
+  }
+
+  /**
+   * 人が publish 承認で確かめた資料を Issue にコメントし、終わりのラベル操作（agents-office を外し needs-human を付ける）と
+   * 自分のアサインの取り外しを行う。GitHub への書き込みは API プロセスの GitHub App が行い、Runner にはトークンを渡さない。
+   * どの操作も繰り返して安全（同じ Run の資料コメントがあれば投稿しない・既に無いラベルの取り外しは成功）
+   */
+  private async postMaterials(ctx: StepExecutionContext): Promise<StepOutput> {
+    const approved = ctx.previous.publish as { kind?: unknown; comment?: unknown; labels?: { remove?: unknown; add?: unknown }; unassign?: unknown } | undefined;
+    if (!approved || approved.kind !== 'materials' || typeof approved.comment !== 'string') {
+      throw new RunnerError('人が承認した資料がありません', 'MATERIALS_NOT_APPROVED', false);
+    }
+    const remote = ctx.remote;
+    const issue = ctx.issueNumber;
+    const host = this.opts.remoteHost;
+    if (!remote || !issue || !host) throw new RunnerError('資料コメントは GitHub App で接続した Repo の Issue にだけ書けます', 'MATERIALS_UNAVAILABLE', false);
+    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    const labels = { remove: strings(approved.labels?.remove), add: strings(approved.labels?.add) };
+    const unassign = approved.unassign === true;
+    // 書き込みの前に、行う操作をすべてポリシーで確かめる（途中まで書いて拒否されないように）
+    const args = { repo: ctx.repo, issue };
+    const checks = [
+      await ctx.tool('github.issue.comment', args, `Issue #${issue} に資料コメントを投稿`),
+      await ctx.tool('github.issue.labels', args, `Issue #${issue} のラベル: 外す ${labels.remove.join(', ') || 'なし'} / 付ける ${labels.add.join(', ') || 'なし'}`),
+      ...(unassign ? [await ctx.tool('github.issue.unassign_self', args, `Issue #${issue} の自分のアサインを外す`)] : []),
+    ];
+    const denied = checks.find((c) => !c.allowed);
+    if (denied) return { status: 'failed', summary: `ポリシーで拒否: ${denied.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
+    const posted = await host.postMaterialsComment(ctx, remote, issue, approved.comment);
+    await host.editIssueLabels(ctx, remote, issue, labels);
+    if (unassign) await host.unassignSelf(ctx, remote, issue);
+    return {
+      status: 'succeeded',
+      summary: posted === 'posted' ? `Issue #${issue} に判断材料をコメント` : `Issue #${issue} の判断材料は投稿済み`,
+      outcome: { materialsPosted: { issue, comment: posted, labels, unassigned: unassign } },
+    };
+  }
+
+  /**
+   * push が拒否された（承認待ちの間に人が ai/ ブランチへ push した等）: 人のコミットの取り込みを試す。
+   *  - 早送りで取り込めた: HEAD が承認した内容から変わったので、テストと AI レビューからやり直して承認を作り直す（PUBLISH_STALE）
+   *  - 履歴が分岐している: syncBranch の BRANCH_DIVERGED のまま投げ、エンジンが needs_input で人の判断を待つ
+   *  - 取り込むものが無い（取得までの間に GitHub 側が戻った）: 承認した内容のまま、push を再試行する
+   * どれも Run を失敗にしない
+   */
+  private async onPushRejected(ctx: StepExecutionContext, wt: Worktree, remote: NonNullable<StepExecutionContext['remote']>, err: unknown): Promise<never> {
+    if (!(err instanceof RunnerError && err.code === 'GIT_PUSH_REJECTED')) throw err;
+    await ctx.log(`${err.message.split(':')[0]} — GitHub の ${ctx.branch} の人のコミットを取り込みます`, 'error');
+    const synced = await this.opts.remoteHost!.syncBranch(ctx, wt, remote, ctx.branch);
+    if (synced === 'fast_forwarded') throw new PublishStaleError('GitHub 側の人のコミットを取り込んだため、承認した内容から HEAD が変わりました');
+    throw new RunnerError('push が拒否されましたが、取り込むコミットはありませんでした（再試行します）', 'GIT_PUSH_FAILED', true);
+  }
+
+  private async pullRequest(ctx: StepExecutionContext, wt: Worktree): Promise<StepOutput> {
+    // push・PR 作成の前に、作業ツリーの .git が書き換えられていないことを確かめる
+    await assertGitLink(wt);
+    // 人が publish 承認で確かめた head と今の HEAD が違えば、承認していない内容なので何も書かない（エンジンが承認を作り直す）
+    const approved = ctx.previous.publish as { kind?: unknown; update?: unknown; headSha?: unknown; title?: unknown; body?: unknown; labels?: { remove?: unknown; add?: unknown } } | undefined;
+    // 人が承認したのが PR の操作で、作成・更新の別がこの工程（draft_pr / update_pr）と一致するときだけ書く
+    if (approved && (approved.kind !== 'pull_request' || approved.update !== (ctx.key === 'update_pr'))) {
+      throw new RunnerError('人が承認した内容と、この PR の工程（作成・更新）が一致しません', 'PUBLISH_NOT_APPROVED', false);
+    }
+    const head = await headSha(wt);
+    if (!approved || approved.headSha !== head) {
+      await ctx.log(`承認した head（${String(approved?.headSha ?? 'なし').slice(0, 12)}）と worktree の HEAD（${head.slice(0, 12)}）が違うため、push せずテストと AI レビューからやり直します`, 'error');
+      throw new PublishStaleError('承認した内容から worktree の HEAD が変わっています');
+    }
     const update = ctx.key === 'update_pr' && ctx.pr !== null;
     const remote = ctx.remote;
     const push = await ctx.tool('github.branch.push', { repo: ctx.repo, branch: ctx.branch }, `ブランチを確定: ${ctx.branch}${remote ? '（GitHub に push）' : '（ローカル）'}`);
     if (!push.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${push.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
-    const tool = update ? 'github.pull_request.update' : 'github.pull_request.create_draft';
+    const tool = update ? 'github.pull_request.update' : 'github.pull_request.create';
     const res = await ctx.tool(
       tool,
-      { repo: ctx.repo, branch: ctx.branch, base: remote?.defaultBranch ?? 'main', draft: true },
-      update ? `Draft PR #${ctx.pr!.number} を更新` : `Draft PR を作成${remote ? '（GitHub）' : '（ローカル）'}`,
+      { repo: ctx.repo, branch: ctx.branch, base: remote?.defaultBranch ?? 'main', draft: false },
+      update ? `PR #${ctx.pr!.number} を更新` : `PR を作成${remote ? '（GitHub）' : '（ローカル）'}`,
     );
     if (!res.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${res.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
-    const diff = await diffFromBase(worktree, baseSha);
-    const testsSkipped = Boolean(ctx.previous.testsSkipped);
-    const testsLine = testsSkipped ? '未実行（コマンド未設定）' : ctx.previous.testsPassed === false ? '✗ 失敗' : '✓ 通過';
-    let pr: { number: number; url: string; branch: string; headSha: string; draft: true };
+    // PR の後に行うラベル操作は、人が承認した内容（publish 承認の labels）だけ。書き込みの前にポリシーで確かめる
+    const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    const labels = { remove: strs(approved.labels?.remove), add: strs(approved.labels?.add) };
+    const editLabels = Boolean(remote && ctx.issueNumber && (labels.remove.length || labels.add.length));
+    if (editLabels) {
+      const lab = await ctx.tool('github.issue.labels', { repo: ctx.repo, issue: ctx.issueNumber }, `Issue #${ctx.issueNumber} のラベル: 外す ${labels.remove.join(', ') || 'なし'} / 付ける ${labels.add.join(', ') || 'なし'}`);
+      if (!lab.allowed) return { status: 'failed', summary: `ポリシーで拒否: ${lab.reason}`, outcome: {}, errorCode: 'POLICY_DENIED' };
+    }
+    const diff = await diffFromBase(wt, wt.baseSha);
+    const testsLine = testsLineOf(ctx.previous);
+    let pr: { number: number; url: string; branch: string; headSha: string; draft: false };
     if (remote) {
-      const body = [
-        '## 内容',
-        '',
-        String(ctx.previous.developerSummary ?? ctx.title),
-        '',
-        '## AI レビュー',
-        '',
-        String(ctx.previous.reviewSummary ?? ''),
-        '',
-        `- テスト: ${testsLine}`,
-        `- 変更: ${diff.files.length} ファイル`,
-        ...(ctx.issueNumber ? [`- 関連 Issue: #${ctx.issueNumber}`] : []),
-        '',
-        '---',
-        `Personal AI Workspace の Run \`${ctx.runId}\` が作成した Draft PR です。マージするかどうかは人が判断してください（AI はマージしません）。`,
-        '',
-      ].join('\n');
-      const published = await this.opts.remoteHost!.publish(ctx, worktree, remote, {
+      // タイトル・本文は人が承認したものをそのまま使う
+      const published = await this.opts.remoteHost!.publish(ctx, wt, remote, {
         branch: ctx.branch,
+        // 照合済みなので head は承認した SHA。push するのはこのコミットだけ
+        headSha: head,
         existing: update ? { number: ctx.pr!.number, url: ctx.pr!.url } : null,
-        title: ctx.title,
-        body,
-      });
-      pr = { number: published.number, url: published.url, branch: ctx.branch, headSha: published.headSha, draft: true };
+        title: String(approved.title ?? ctx.title),
+        body: String(approved.body ?? ''),
+      }).catch((err) => this.onPushRejected(ctx, wt, remote, err));
+      pr = { number: published.number, url: published.url, branch: ctx.branch, headSha: published.headSha, draft: false };
+      if (editLabels) {
+        // PR は作成済み。ラベルの取り外しに失敗しても Run は止めない（Run は PR 待ちになり、再起動はしない）
+        try {
+          await this.opts.remoteHost!.editIssueLabels(ctx, remote, ctx.issueNumber!, labels);
+        } catch (err) {
+          await ctx.log(`PR は作成しましたが Issue #${ctx.issueNumber} のラベルを変更できませんでした: ${String((err as Error)?.message ?? err).slice(0, 200)}`, 'error');
+        }
+      }
     } else {
       const number = update ? ctx.pr!.number : await ctx.allocatePrNumber();
-      pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: await headSha(worktree), draft: true };
+      pr = { number, url: `local-git://${ctx.localRepo!.path}#${ctx.branch}`, branch: ctx.branch, headSha: head, draft: false };
     }
     const md = [
-      `# ${update ? 'Draft PR 更新' : 'Draft PR 作成'} — #${pr.number}`,
+      `# ${update ? 'PR 更新' : 'PR 作成'} — #${pr.number}`,
       '',
       remote ? `- GitHub: ${pr.url}` : `- リポジトリ: \`${ctx.localRepo!.path}\``,
-      `- ブランチ: \`${ctx.branch}\`（base: \`${remote ? `${remote.defaultBranch} @ ` : ''}${baseSha.slice(0, 7)}\`）`,
+      `- ブランチ: \`${ctx.branch}\`（base: \`${remote ? `${remote.defaultBranch} @ ` : ''}${wt.baseSha.slice(0, 7)}\`）`,
       `- head: \`${pr.headSha.slice(0, 12)}\``,
       `- 変更: ${diff.files.length} ファイル`,
       `- テスト: ${testsLine}`,
@@ -409,7 +674,7 @@ export class ClaudeRunner implements AgentRunner {
         : `ローカル版では GitHub に push しません。ブランチ \`${ctx.branch}\` を確認し、問題なければ人がマージしてください（AI はマージしません）。`,
       '',
     ].join('\n');
-    await ctx.artifact('draft_pr', `Draft PR #${pr.number}${update ? '（更新）' : ''}`, 'draft-pr.md', 'text/markdown', md);
-    return { status: 'succeeded', summary: `Draft PR #${pr.number} ${update ? '更新' : '作成'}（ブランチ ${ctx.branch}）`, outcome: { pr } };
+    await ctx.artifact('draft_pr', `PR #${pr.number}${update ? '（更新）' : ''}`, 'draft-pr.md', 'text/markdown', md);
+    return { status: 'succeeded', summary: `PR #${pr.number} ${update ? '更新' : '作成'}（ブランチ ${ctx.branch}）`, outcome: { pr } };
   }
 }

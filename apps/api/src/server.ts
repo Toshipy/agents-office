@@ -1,11 +1,12 @@
 import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { loadConfig, REPO_ROOT } from './config';
-import { createApp, createServices } from './app';
+import { createApp, createServices, startServices } from './app';
 import { DemoTraffic } from './demo/traffic';
 import { log, setLogLevel } from './lib/logger';
 import { seedIfEmpty } from './seed';
 import { resolveAgentRuntime } from './agents/claude/detect';
+import { assertSafeServerConfig } from './serverGuard';
 
 async function main() {
   // `pnpm start` またはサーバー運用（PAW_SERVE_WEB=1）では、ビルド済みの Web 画面も API から配信する
@@ -15,6 +16,8 @@ async function main() {
   });
   setLogLevel(config.logLevel);
   await resolveAgentRuntime(config);
+  // サーバーモードでは、危険な既定値のままの起動を止める
+  assertSafeServerConfig(config);
   log.info('agent runtime', { runtime: config.agentRuntime, reason: config.agentRuntimeReason });
   if (config.githubApp) {
     log.info('github app', { appId: config.githubApp.appId, allowedUsers: config.githubApp.allowedUsers });
@@ -22,9 +25,7 @@ async function main() {
   const services = await createServices(config);
   const app = createApp(services);
   if (config.seedDemo) await seedIfEmpty(services);
-  await services.engine.start();
-  services.dispatcher.start();
-  services.seats.start();
+  await startServices(services);
   const demo = new DemoTraffic(services);
   if (config.enableDevRoutes) demo.start();
 
@@ -41,6 +42,7 @@ async function main() {
     shuttingDown = true;
     log.info('shutting down', { signal });
     demo.stop();
+    await services.poller?.stop();
     services.dispatcher.stop();
     services.seats.stop();
     await services.engine.stop();

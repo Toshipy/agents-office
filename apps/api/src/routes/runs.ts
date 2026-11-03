@@ -46,7 +46,7 @@ export function registerRunRoutes(app: Hono<AppEnv>, s: Services) {
         .select()
         .from(repositoryBindings)
         .where(and(eq(repositoryBindings.projectId, project.id), eq(repositoryBindings.workspaceId, a.workspaceId)));
-      if (!binding) throw new AppError(422, 'REPO_NOT_CONNECTED', 'Draft PR を作るには Project に Repo を接続してください');
+      if (!binding) throw new AppError(422, 'REPO_NOT_CONNECTED', 'PR を作るには Project に Repo を接続してください');
       const [ws] = await s.db.select().from(workspaces).where(eq(workspaces.id, a.workspaceId));
       if (ws.paused) throw new AppError(409, 'WORKSPACE_PAUSED', 'キルスイッチで停止中です。設定から再開してください');
       if ((await s.engine.monthCostUsd(ws.id)) >= ws.monthlyBudgetUsd) {

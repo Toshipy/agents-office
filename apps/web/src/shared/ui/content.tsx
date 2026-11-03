@@ -206,6 +206,7 @@ const KIND_ICON: Record<string, string> = {
   test_report: 'flask',
   review: 'search',
   draft_pr: 'git-pr',
+  materials: 'map',
   log: 'terminal',
 };
 

@@ -26,6 +26,7 @@ export class ApiError extends Error {
     public code: string,
     message: string,
     public requestId?: string,
+    public details?: unknown,
   ) {
     super(message);
   }
@@ -50,8 +51,8 @@ async function request<T>(method: string, path: string, body?: unknown, headers:
   const text = await res.text();
   const data = text ? (JSON.parse(text) as unknown) : null;
   if (!res.ok) {
-    const e = (data ?? {}) as { code?: string; message?: string; requestId?: string };
-    throw new ApiError(res.status, e.code ?? 'HTTP_ERROR', e.message ?? `HTTP ${res.status}`, e.requestId);
+    const e = (data ?? {}) as { code?: string; message?: string; requestId?: string; details?: unknown };
+    throw new ApiError(res.status, e.code ?? 'HTTP_ERROR', e.message ?? `HTTP ${res.status}`, e.requestId, e.details);
   }
   return data as T;
 }
@@ -149,7 +150,7 @@ export interface ApprovalDto {
 
 export interface ArtifactMeta {
   id: string;
-  kind: 'plan' | 'diff' | 'test_report' | 'review' | 'draft_pr' | 'log';
+  kind: 'plan' | 'diff' | 'test_report' | 'review' | 'draft_pr' | 'materials' | 'log';
   title: string;
   stepId?: string | null;
   mediaType: string;
@@ -232,3 +233,27 @@ export interface GithubInstallationsDto {
     repositories: { fullName: string; repositoryId: number; private?: boolean; projectId: string | null }[];
   }[];
 }
+
+/** GitHub の Issue 1 件（API の IssueRow）。skipReason は API が付けるときだけ入る */
+export interface IssueRowDto {
+  number: number;
+  title: string;
+  body: string;
+  htmlUrl: string;
+  labels: string[];
+  assignees: string[];
+  updatedAt: string;
+  runId: string | null;
+  skipReason: string | null;
+}
+
+export interface IssueListDto {
+  candidates: IssueRowDto[];
+  materials: IssueRowDto[];
+  running: IssueRowDto[];
+}
+
+export const listIssues = (projectId: string) => api.get<IssueListDto>(`/v1/projects/${projectId}/issues`);
+
+export const delegateIssue = (projectId: string, issueNumber: number, guidance?: string) =>
+  api.post<{ runId: string }>(`/v1/projects/${projectId}/issues/${issueNumber}/delegate`, guidance?.trim() ? { guidance: guidance.trim() } : {});
