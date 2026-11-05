@@ -92,7 +92,8 @@ flowchart LR
 - 更新系の要求に付ける既存の CSRF 対策（`x-paw-client` ヘッダーと Origin の照合）は残す。`PAW_PUBLIC_URL` の Origin は今も自動で許可に入る
 - `/v1/auth/config` は `mode: 'alb_oidc'` を返し、Web はログイン画面を出さずにそのまま中へ進む
 - サインアウトは、ALB のログイン Cookie（`AWSELBAuthSessionCookie-*`）を期限切れにして、トップへ戻す。次に開くと Google のログインからやり直しになる
-- ALB のログインの有効期限が切れると、API への fetch や SSE は Google へのリダイレクトで失敗する。Web は API の失敗が 401 か、リダイレクトによる失敗だったとき、ページを読み直して ALB のログインをやり直させる
+- ALB のログインの有効期限が切れると、API への fetch や SSE は Google へのリダイレクトで失敗する。Web はリダイレクトによる失敗のとき、ページを読み直して ALB のログインをやり直させる（60 秒に 1 回まで）
+- アプリが 401 を返したとき（許可していない Google アカウントなど）は、読み直さずに「このアカウントでは使えません」を出す。読み直しを繰り返さないため
 
 ### 4.5 起動時の検査（serverGuard）
 
