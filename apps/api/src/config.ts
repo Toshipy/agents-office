@@ -63,6 +63,14 @@ export interface AppConfig {
   signup: 'open' | 'first_user' | 'closed';
   /** 設定すると、新規登録にこのコードが必要（公開 URL で第三者に先に登録されないようにする） */
   signupCode: string | null;
+  /** 認証方式。local = ID・パスワード + セッション Cookie / alb_oidc = ALB の OIDC が渡す JWT だけで入る */
+  auth: 'local' | 'alb_oidc';
+  /** alb_oidc で JWT の signer と照合する ALB の ARN（PAW_ALB_ARN） */
+  albArn: string | null;
+  /** alb_oidc で入れる 1 人のメールアドレス（PAW_ALLOWED_EMAIL） */
+  allowedEmail: string | null;
+  /** ALB の公開鍵を取りに行くリージョン（PAW_AWS_REGION） */
+  awsRegion: string;
 }
 
 /**
@@ -269,6 +277,10 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     cookieSecure: publicUrl?.startsWith('https://') ?? false,
     signup: parseSignup(process.env.PAW_SIGNUP),
     signupCode: nonEmpty(process.env.PAW_SIGNUP_CODE) ?? null,
+    auth: process.env.PAW_AUTH?.trim().toLowerCase() === 'alb_oidc' ? 'alb_oidc' : 'local',
+    albArn: nonEmpty(process.env.PAW_ALB_ARN) ?? null,
+    allowedEmail: nonEmpty(process.env.PAW_ALLOWED_EMAIL)?.toLowerCase() ?? null,
+    awsRegion: nonEmpty(process.env.PAW_AWS_REGION) ?? 'ap-northeast-1',
     ...overrides,
   };
 }

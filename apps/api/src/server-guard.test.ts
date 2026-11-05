@@ -14,6 +14,9 @@ const safe = {
   agentRuntime: 'claude_code',
   testSandbox: 'docker',
   claudeCode: { restricted: true, detected: { supportsRestricted: true } },
+  auth: 'alb_oidc',
+  albArn: 'arn:aws:elasticloadbalancing:ap-northeast-1:111122223333:loadbalancer/app/agents-office/abc',
+  allowedEmail: 't.arai@fenrir.co.jp',
 };
 
 /** loadConfig の結果に、テスト用の上書き（claudeCode は浅くマージ）を重ねる */
@@ -28,20 +31,25 @@ describe('assertSafeServerConfig', () => {
   it('ローカル（publicUrl なし）は何でも通す', () =>
     expect(() => assertSafeServerConfig(cfg({ ...safe, publicUrl: null, signup: 'open', seedDemo: true }))).not.toThrow());
   it.each([
-    [{ signup: 'open' }, 'PAW_SIGNUP'],
+    [{ signup: 'open', auth: 'local' }, 'PAW_SIGNUP'],
     [{ seedDemo: true }, 'PAW_SEED_DEMO'],
     [{ enableDevRoutes: true }, 'PAW_DEV_ROUTES'],
     [{ testSandbox: 'host' }, 'PAW_TEST_SANDBOX'],
+    [{ auth: 'local' }, 'PAW_AUTH'],
+    [{ albArn: null }, 'PAW_ALB_ARN'],
+    [{ allowedEmail: null }, 'PAW_ALLOWED_EMAIL'],
     [{ claudeCode: { restricted: false, detected: { supportsRestricted: true } } }, 'PAW_CLAUDE_CODE_RESTRICTED'],
     [{ claudeCode: { restricted: true, detected: { supportsRestricted: false } } }, '--restricted'],
   ])('%o は起動を拒む', (patch, word) => expect(() => assertSafeServerConfig(cfg({ ...safe, ...patch }))).toThrow(word));
+  it('alb_oidc なら signup が open でも拒まない（登録の経路そのものが無い）', () =>
+    expect(() => assertSafeServerConfig(cfg({ ...safe, signup: 'open' }))).not.toThrow());
   it('GitHub App があるのに実行基盤がシミュレーションなら起動を拒む', () => {
     const githubApp = { appId: '1', privateKeyPem: 'x', apiUrl: 'https://api.github.com', allowedUsers: ['toshipy'] };
     expect(() => assertSafeServerConfig(cfg({ ...safe, githubApp, agentRuntime: 'simulated', agentRuntimeReason: 'Claude Code にログインしていません' }))).toThrow(/GitHub App[\s\S]*シミュレーション[\s\S]*ログインしていません/);
     expect(() => assertSafeServerConfig(cfg({ ...safe, githubApp }))).not.toThrow();
   });
   it('複数の問題をまとめて返す', () =>
-    expect(() => assertSafeServerConfig(cfg({ ...safe, signup: 'open', seedDemo: true }))).toThrow(/PAW_SIGNUP[\s\S]*PAW_SEED_DEMO/));
+    expect(() => assertSafeServerConfig(cfg({ ...safe, auth: 'local', signup: 'open', seedDemo: true }))).toThrow(/PAW_SIGNUP[\s\S]*PAW_SEED_DEMO/));
   it('claude_code 以外の実行基盤では --restricted の 2 項目を見ない', () =>
     expect(() => assertSafeServerConfig(cfg({ ...safe, agentRuntime: 'simulated', claudeCode: { restricted: false, detected: null } }))).not.toThrow());
 });
