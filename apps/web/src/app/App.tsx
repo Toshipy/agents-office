@@ -10,6 +10,7 @@ import { Toaster } from '../shared/ui/toast';
 import { clockTime, usd } from '../shared/ui/format';
 import { LOOKS, LOOK_IDS, useLook } from '../shared/look';
 import { LoginPage } from '../features/auth/LoginPage';
+import { NotAllowedPage } from '../features/auth/NotAllowedPage';
 import { OfficePage } from '../features/office/OfficePage';
 import { RunListPage } from '../features/runs/RunListPage';
 import { RunDetailPage } from '../features/runs/RunDetailPage';
@@ -58,10 +59,12 @@ function useApplyLook() {
 export function App() {
   useApplyLook();
   const me = useMe();
+  const cfg = useAuthConfig();
   const qc = useQueryClient();
   useRealtime(qc, Boolean(me.data));
 
-  if (me.isLoading) {
+  // 認証モードが分かるまで待つ（alb_oidc かどうかで未ログイン時の画面が変わる）
+  if (me.isLoading || (!me.data && cfg.isLoading)) {
     return (
       <div className="boot">
         <div className="spinner" />
@@ -78,7 +81,7 @@ export function App() {
       </div>
     );
   }
-  if (!me.data) return <LoginPage />;
+  if (!me.data) return cfg.data?.mode === 'alb_oidc' ? <NotAllowedPage /> : <LoginPage />;
   return (
     <>
       <Routes>
@@ -131,11 +134,17 @@ function Shell({ me }: { me: Me }) {
   const navigate = useNavigate();
   const pending = snapshot?.approvalsPending ?? 0;
   const paused = snapshot?.workspace.settings.paused ?? me.workspace.settings.paused;
+  const albOidc = useAuthConfig().data?.mode === 'alb_oidc';
   const logout = async () => {
     try {
       await api.post('/v1/auth/logout');
     } catch {
       // サーバー側のセッションが既に無い場合も、画面はログアウト状態にする
+    }
+    if (albOidc) {
+      // ALB のセッション Cookie はログアウト API が消した。読み直して ALB に再ログインさせる
+      location.assign('/');
+      return;
     }
     // 先にログイン情報を「未ログイン」にしてログイン画面へ切り替える。
     // qc.clear() で me ごと消すと、表示中のコンポーネントが古いログイン情報を持ったまま読み込み中で止まる
