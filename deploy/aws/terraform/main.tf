@@ -434,6 +434,10 @@ resource "aws_lb_listener" "https" {
       scope                      = "openid email profile"
       session_timeout            = 604800
       on_unauthenticated_request = "authenticate"
+      # サインアウト後も Google 側のログインが残るため、毎回アカウントを選ばせる（別アカウントへ切り替えられるように）
+      authentication_request_extra_params = {
+        prompt = "select_account"
+      }
     }
   }
 

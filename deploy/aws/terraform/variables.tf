@@ -156,10 +156,20 @@ variable "google_client_id_param" {
   description = "Google OAuth クライアント ID を入れた SSM パラメーター名。EC2 のロールが読めないよう ssm_prefix の外（-alb）に置く"
   type        = string
   default     = null
+
+  validation {
+    condition     = var.google_client_id_param == null || !startswith(var.google_client_id_param, "${var.ssm_prefix}/")
+    error_message = "google_client_id_param は ssm_prefix の内側（${var.ssm_prefix}/ 以下）に置けません。EC2 のロールが読めてしまうため、ssm_prefix の外を指定してください。"
+  }
 }
 
 variable "google_client_secret_param" {
   description = "Google OAuth クライアント秘密を入れた SSM パラメーター名（SecureString）。EC2 のロールが読めないよう ssm_prefix の外（-alb）に置く"
   type        = string
   default     = null
+
+  validation {
+    condition     = var.google_client_secret_param == null || !startswith(var.google_client_secret_param, "${var.ssm_prefix}/")
+    error_message = "google_client_secret_param は ssm_prefix の内側（${var.ssm_prefix}/ 以下）に置けません。EC2 のロールが読めてしまうため、ssm_prefix の外を指定してください。"
+  }
 }

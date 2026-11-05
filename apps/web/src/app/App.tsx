@@ -63,7 +63,8 @@ export function App() {
   const qc = useQueryClient();
   useRealtime(qc, Boolean(me.data));
 
-  // me がエラーなら先に接続エラー画面を出す（config 待ちで遅らせない）。
+  // me がエラー（401 以外。alb_oidc の公開鍵を取れない 503 も含む）なら、NotAllowedPage ではなく接続エラー画面を出す。
+  // 先に出して config 待ちで遅らせない（config 待ちで遅らせない）。
   // 認証モードが分かるまで待つ（alb_oidc かどうかで未ログイン時の画面が変わる）
   const meFailed = Boolean(me.error && !me.data);
   if (!meFailed && (me.isLoading || (!me.data && cfg.isLoading))) {
@@ -78,7 +79,7 @@ export function App() {
   if (meFailed || cfgFailed) {
     return (
       <div className="boot error-text">
-        <p>API に接続できません。`pnpm dev` で API が起動しているか確認してください。</p>
+        <p>API に接続できません。ローカルでは `pnpm dev` で API が起動しているか、サーバーでは認証の公開鍵を取得できているか（503）を確認してください。</p>
         <button
           className="btn"
           onClick={() => {
