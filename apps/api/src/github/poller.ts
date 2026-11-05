@@ -11,6 +11,7 @@ import { repositoryBindings, runs, webhookDeliveries } from '../db/schema';
 import { log } from '../lib/logger';
 import type { GithubApp } from './app';
 import { AGENTS_OFFICE_LABEL } from './labels';
+import { inPollWindow, type PollWindow } from './pollWindow';
 
 export const POLL_PROVIDER = 'github_poll';
 
@@ -33,7 +34,10 @@ export class GithubPoller {
     private readonly db: Db,
     private readonly github: GithubApp,
     private readonly intervalMs: number,
-    private readonly login?: string | null,
+    private readonly login: string | null | undefined,
+    /** 取り込む時間帯。外では GitHub を読まない（'always' で制限なし） */
+    private readonly window: PollWindow | 'always',
+    private readonly now: () => Date = () => new Date(),
   ) {}
 
   start(): void {
@@ -55,6 +59,11 @@ export class GithubPoller {
     this.running = true;
     this.current = (async () => {
       try {
+        // 時間帯の外（夜間・休日）は何もしない。start() の最初の 1 回もここを通る
+        if (!inPollWindow(this.now(), this.window)) {
+          log.debug('github poll skipped (outside window)');
+          return;
+        }
         await this.pollIssues();
         await this.pollPulls();
       } catch (err) {

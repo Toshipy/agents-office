@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentRuntime } from '@paw/contracts';
 import { log } from './lib/logger';
+import { parsePollWindow, type PollWindow } from './github/pollWindow';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(here, '../../..');
@@ -50,8 +51,10 @@ export interface AppConfig {
   testNetwork: string;
   /** GitHub App 連携（未設定ならローカルの GitHub シミュレーターのみ） */
   githubApp: { appId: string; privateKeyPem: string; apiUrl: string; allowedUsers: string[] } | null;
-  /** GitHub のポーリング間隔（ミリ秒。PAW_GITHUB_POLL_MS、既定 60 秒） */
+  /** GitHub のポーリング間隔（ミリ秒。PAW_GITHUB_POLL_MS、既定 15 分） */
   githubPollMs: number;
+  /** GitHub をポーリングする時間帯（PAW_GITHUB_POLL_WINDOW、既定 平日 9〜19 時 JST。'always' で制限なし） */
+  githubPollWindow: PollWindow | 'always';
   /** ポーリングで Issue を拾うときの自分の GitHub ログイン名（PAW_GITHUB_LOGIN、無ければ許可ユーザーの先頭、無ければ null） */
   githubLogin: string | null;
   /** 受信 Webhook を有効にする（PAW_GITHUB_WEBHOOK=1）。既定は無効 = サーバーをインターネットに出さなくてよい */
@@ -101,7 +104,7 @@ function loadGithubApp(): AppConfig['githubApp'] {
 
 function parsePollMs(v: string | undefined): number {
   const n = Number(v);
-  return Number.isFinite(n) && n >= 10_000 ? Math.floor(n) : 60_000;
+  return Number.isFinite(n) && n >= 10_000 ? Math.floor(n) : 900_000;
 }
 
 function parseSignup(v: string | undefined): AppConfig['signup'] {
@@ -271,6 +274,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     testNetwork: nonEmpty(process.env.PAW_TEST_NETWORK) ?? 'paw-test',
     githubApp,
     githubPollMs: parsePollMs(process.env.PAW_GITHUB_POLL_MS),
+    githubPollWindow: parsePollWindow(process.env.PAW_GITHUB_POLL_WINDOW),
     githubLogin: nonEmpty(process.env.PAW_GITHUB_LOGIN) ?? githubApp?.allowedUsers[0] ?? null,
     githubWebhookEnabled: process.env.PAW_GITHUB_WEBHOOK === '1',
     publicUrl,

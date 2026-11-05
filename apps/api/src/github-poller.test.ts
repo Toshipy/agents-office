@@ -8,6 +8,7 @@ import { eq } from 'drizzle-orm';
 import { loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
 import { GithubPoller } from './github/poller';
+import { parsePollWindow } from './github/pollWindow';
 import { IssueIntake } from './github/issueIntake';
 import type { GithubApp } from './github/app';
 import { repositoryBindings, runs, webhookDeliveries, workspaces } from './db/schema';
@@ -119,9 +120,25 @@ describe('GithubPoller', () => {
     expect(res.status).toBe(404);
   });
 
+  it('時間帯の外では GitHub に問い合わせない', async () => {
+    gh.issues = [{ number: 9, title: 't', body: 'b', htmlUrl: 'u', labels: ['agents-office'], assignees: [], updatedAt: 'x' }];
+    vi.mocked(fakeGithub.listIssuesWithLabel).mockClear();
+    const sat = () => new Date('2026-11-14T03:00:00Z'); // 土 12:00 JST
+    await new GithubPoller(s.db, fakeGithub, 60_000, 'toshipy', parsePollWindow(undefined), sat).pollOnce();
+    expect(fakeGithub.listIssuesWithLabel).not.toHaveBeenCalled();
+    gh.issues = [];
+  });
+
+  it('always なら時間帯に関係なく問い合わせる', async () => {
+    vi.mocked(fakeGithub.listIssuesWithLabel).mockClear();
+    const sat = () => new Date('2026-11-14T03:00:00Z');
+    await new GithubPoller(s.db, fakeGithub, 60_000, 'toshipy', 'always', sat).pollOnce();
+    expect(fakeGithub.listIssuesWithLabel).toHaveBeenCalled();
+  });
+
   it('Issue は 2 回ポーリングしても配信が 1 件で、Run も 1 件', async () => {
     gh.issues = [{ number: 5, title: 'CSV 出力', body: '追加して', htmlUrl: 'https://github.com/toshipy/demo/issues/5', labels: ['agents-office'], assignees: [], updatedAt: 'x' }];
-    const poller = new GithubPoller(s.db, fakeGithub, 60_000, 'toshipy');
+    const poller = new GithubPoller(s.db, fakeGithub, 60_000, 'toshipy', 'always');
     await poller.pollOnce();
     await poller.pollOnce();
     const ds = await s.db.select().from(webhookDeliveries).where(eq(webhookDeliveries.provider, 'github_poll'));
@@ -137,7 +154,7 @@ describe('GithubPoller', () => {
 
   it('ログイン名が null なら Issue から Run を作らない', async () => {
     gh.issues = [{ number: 6, title: 't', body: '', htmlUrl: '', labels: ['agents-office'], assignees: [], updatedAt: 'x' }];
-    await new GithubPoller(s.db, fakeGithub, 60_000, null).pollOnce();
+    await new GithubPoller(s.db, fakeGithub, 60_000, null, 'always').pollOnce();
     const ds = await s.db.select().from(webhookDeliveries);
     expect(ds.some((d) => d.deliveryId.includes(':6:'))).toBe(false);
   });
@@ -157,7 +174,7 @@ describe('GithubPoller', () => {
     });
     gh.failFor = FULL_NAME; // 先に処理される（作成順）FULL_NAME が失敗する
     gh.issues = [{ number: 7, title: 't', body: '', htmlUrl: '', labels: ['agents-office'], assignees: [], updatedAt: 'x' }];
-    await new GithubPoller(s.db, fakeGithub, 60_000, 'toshipy').pollOnce();
+    await new GithubPoller(s.db, fakeGithub, 60_000, 'toshipy', 'always').pollOnce();
     gh.failFor = null;
     const ds = await s.db.select().from(webhookDeliveries);
     expect(ds.some((d) => d.deliveryId.startsWith('poll:issue:999:7:'))).toBe(true);
@@ -177,7 +194,7 @@ describe('GithubPoller', () => {
     await s.db.update(runs).set({ status: 'completed' }).where(eq(runs.id, run.id));
     gh.issues = [{ number: 8, title: 't', body: '', htmlUrl: '', labels: ['agents-office'], assignees: [], updatedAt: 'a' }];
     gh.labeledAt = '2026-11-01T02:00:00Z'; // Run より前
-    const poller = new GithubPoller(s.db, fakeGithub, 60_000, 'toshipy');
+    const poller = new GithubPoller(s.db, fakeGithub, 60_000, 'toshipy', 'always');
     await poller.pollOnce();
     const has8 = async () => (await s.db.select().from(webhookDeliveries)).filter((d) => d.deliveryId.startsWith(`poll:issue:${REPO_ID}:8:`));
     expect(await has8()).toHaveLength(0);
@@ -210,7 +227,7 @@ describe('GithubPoller', () => {
       { id: 2, state: 'CHANGES_REQUESTED', body: '直して', user: 'toshipy', commitId: 'sha-1' },
       { id: 3, state: 'APPROVED', body: '', user: 'toshipy', commitId: 'old-sha' },
     ];
-    const poller = new GithubPoller(s.db, fakeGithub, 60_000, 'toshipy');
+    const poller = new GithubPoller(s.db, fakeGithub, 60_000, 'toshipy', 'always');
     await poller.pollOnce();
     await poller.pollOnce();
     const ds = (await s.db.select().from(webhookDeliveries)).filter((d) => d.deliveryId.startsWith(`poll:review:${REPO_ID}:12:`));

@@ -119,7 +119,7 @@ export async function createServices(
   if (github) engine.setIssueCleanup(new IssueCleanup(db, github, config.githubLogin));
   const dispatcher = new Dispatcher(db, bus, engine, github, issueIntake);
   const seats = new SeatWatcher(db, bus);
-  const poller = github ? new GithubPoller(db, github, config.githubPollMs, config.githubLogin) : null;
+  const poller = github ? new GithubPoller(db, github, config.githubPollMs, config.githubLogin, config.githubPollWindow) : null;
   const albKeyFetcher = config.auth === 'alb_oidc' ? (opts.albKeyFetcher ?? albPublicKeyFetcher(config.awsRegion)) : null;
   return { db, client, config, bus, store, engine, dispatcher, issueIntake, seats, github, poller, testSandbox, albKeyFetcher };
 }
