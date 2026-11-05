@@ -32,6 +32,31 @@ export class ApiError extends Error {
   }
 }
 
+/** ALB の Google ログインの背後で動いているか（/v1/auth/config の mode が alb_oidc のとき true） */
+let albOidc = false;
+export function setAlbOidc(on: boolean) {
+  albOidc = on;
+}
+
+const RELOAD_KEY = 'paw:alb-reload-at';
+const RELOAD_MIN_INTERVAL_MS = 60_000;
+
+/**
+ * ALB のログインが切れると fetch が Google へリダイレクトされ、CORS で TypeError になる。
+ * ページを読み直して ALB に再ログインさせる。読み直しの連発を避けるため、60 秒以内には繰り返さない。
+ */
+function reloadForAlbLogin() {
+  try {
+    const last = Number(sessionStorage.getItem(RELOAD_KEY) ?? '0');
+    if (Date.now() - last < RELOAD_MIN_INTERVAL_MS) return;
+    sessionStorage.setItem(RELOAD_KEY, String(Date.now()));
+  } catch {
+    // sessionStorage が使えないときは、読み直しの連発を避けるため何もしない
+    return;
+  }
+  location.reload();
+}
+
 async function request<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
   let res: Response;
   try {
@@ -45,7 +70,8 @@ async function request<T>(method: string, path: string, body?: unknown, headers:
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-  } catch {
+  } catch (e) {
+    if (albOidc && e instanceof TypeError) reloadForAlbLogin();
     throw new ApiError(0, 'NETWORK', 'サーバーに接続できません（API が起動しているか確認してください）');
   }
   const text = await res.text();

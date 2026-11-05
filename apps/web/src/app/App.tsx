@@ -10,6 +10,7 @@ import { Toaster } from '../shared/ui/toast';
 import { clockTime, usd } from '../shared/ui/format';
 import { LOOKS, LOOK_IDS, useLook } from '../shared/look';
 import { LoginPage } from '../features/auth/LoginPage';
+import { NotAllowedPage } from '../features/auth/NotAllowedPage';
 import { OfficePage } from '../features/office/OfficePage';
 import { RunListPage } from '../features/runs/RunListPage';
 import { RunDetailPage } from '../features/runs/RunDetailPage';
@@ -58,27 +59,40 @@ function useApplyLook() {
 export function App() {
   useApplyLook();
   const me = useMe();
+  const cfg = useAuthConfig();
   const qc = useQueryClient();
   useRealtime(qc, Boolean(me.data));
 
-  if (me.isLoading) {
+  // me がエラー（401 以外。alb_oidc の公開鍵を取れない 503 も含む）なら、NotAllowedPage ではなく接続エラー画面を出す。
+  // 先に出して config 待ちで遅らせない（config 待ちで遅らせない）。
+  // 認証モードが分かるまで待つ（alb_oidc かどうかで未ログイン時の画面が変わる）
+  const meFailed = Boolean(me.error && !me.data);
+  if (!meFailed && (me.isLoading || (!me.data && cfg.isLoading))) {
     return (
       <div className="boot">
         <div className="spinner" />
       </div>
     );
   }
-  if (me.error && !me.data) {
+  // 未ログインで認証設定を取れなかったとき、LoginPage に落とすと alb_oidc でも登録画面が出てしまう
+  const cfgFailed = !me.data && !cfg.data;
+  if (meFailed || cfgFailed) {
     return (
       <div className="boot error-text">
-        <p>API に接続できません。`pnpm dev` で API が起動しているか確認してください。</p>
-        <button className="btn" onClick={() => void me.refetch()}>
+        <p>API に接続できません。ローカルでは `pnpm dev` で API が起動しているか、サーバーでは認証の公開鍵を取得できているか（503）を確認してください。</p>
+        <button
+          className="btn"
+          onClick={() => {
+            void me.refetch();
+            void cfg.refetch();
+          }}
+        >
           再試行
         </button>
       </div>
     );
   }
-  if (!me.data) return <LoginPage />;
+  if (!me.data) return cfg.data?.mode === 'alb_oidc' ? <NotAllowedPage /> : <LoginPage />;
   return (
     <>
       <Routes>
@@ -131,11 +145,17 @@ function Shell({ me }: { me: Me }) {
   const navigate = useNavigate();
   const pending = snapshot?.approvalsPending ?? 0;
   const paused = snapshot?.workspace.settings.paused ?? me.workspace.settings.paused;
+  const albOidc = useAuthConfig().data?.mode === 'alb_oidc';
   const logout = async () => {
     try {
       await api.post('/v1/auth/logout');
     } catch {
       // サーバー側のセッションが既に無い場合も、画面はログアウト状態にする
+    }
+    if (albOidc) {
+      // ALB のセッション Cookie はログアウト API が消した。読み直して ALB に再ログインさせる
+      location.assign('/');
+      return;
     }
     // 先にログイン情報を「未ログイン」にしてログイン画面へ切り替える。
     // qc.clear() で me ごと消すと、表示中のコンポーネントが古いログイン情報を持ったまま読み込み中で止まる

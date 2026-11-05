@@ -1,4 +1,5 @@
 import type { Hono } from 'hono';
+import { setCookie } from 'hono/cookie';
 import { eq } from 'drizzle-orm';
 import { LoginRequest, SignupRequest } from '@paw/contracts';
 import type { AppEnv, Services } from '../app';
@@ -20,8 +21,13 @@ export function registerAuthRoutes(app: Hono<AppEnv>, s: Services) {
     return !any;
   };
 
+  const alb = s.config.auth === 'alb_oidc';
+  const albOnly = () => new AppError(404, 'AUTH_MODE_ALB', 'このサーバーは ALB の Google ログインで入ります');
+
   app.get('/v1/auth/config', async (c) =>
-    c.json({
+    alb
+      ? c.json({ mode: 'alb_oidc', devRoutes: false, signup: false, signupCodeRequired: false, devAccounts: [] })
+      : c.json({
       mode: s.config.publicUrl ? 'server' : 'local',
       devRoutes: s.config.enableDevRoutes,
       signup: await signupAllowed(),
@@ -31,6 +37,7 @@ export function registerAuthRoutes(app: Hono<AppEnv>, s: Services) {
   );
 
   app.post('/v1/auth/login', async (c) => {
+    if (alb) throw albOnly();
     const body = await parseBody(c, LoginRequest);
     const rateKey = `${body.username.toLowerCase()}`;
     checkLoginRate(rateKey);
@@ -51,6 +58,7 @@ export function registerAuthRoutes(app: Hono<AppEnv>, s: Services) {
   });
 
   app.post('/v1/auth/signup', async (c) => {
+    if (alb) throw albOnly();
     const body = await parseBody(c, SignupRequest);
     if (!(await signupAllowed())) throw new AppError(403, 'SIGNUP_DISABLED', '新規登録は無効です（このサーバーは所有者専用です）');
     if (s.config.signupCode && !safeEqual(body.signupCode ?? '', s.config.signupCode)) {
@@ -79,6 +87,11 @@ export function registerAuthRoutes(app: Hono<AppEnv>, s: Services) {
   });
 
   app.post('/v1/auth/logout', (c) => {
+    if (alb) {
+      // ALB のログイン Cookie（分割されて最大 4 本）を消す。次に開くと Google のログインからやり直しになる
+      for (let i = 0; i < 4; i++) setCookie(c, `AWSELBAuthSessionCookie-${i}`, '', { maxAge: 0, path: '/', secure: true });
+      return c.json({ ok: true });
+    }
     clearSession(c);
     return c.json({ ok: true });
   });

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { api } from './client';
+import { api, setAlbOidc } from './client';
 
 export interface AuthConfig {
   mode: string;
@@ -12,5 +12,13 @@ export interface AuthConfig {
 }
 
 export function useAuthConfig() {
-  return useQuery({ queryKey: ['auth-config'], queryFn: () => api.get<AuthConfig>('/v1/auth/config'), staleTime: Infinity });
+  return useQuery({
+    queryKey: ['auth-config'],
+    queryFn: async () => {
+      const cfg = await api.get<AuthConfig>('/v1/auth/config');
+      setAlbOidc(cfg.mode === 'alb_oidc');
+      return cfg;
+    },
+    staleTime: Infinity,
+  });
 }

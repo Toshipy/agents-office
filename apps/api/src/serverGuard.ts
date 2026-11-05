@@ -7,7 +7,11 @@ import type { AppConfig } from './config';
 export function assertSafeServerConfig(config: AppConfig): void {
   if (!config.publicUrl) return;
   const problems: string[] = [];
-  if (config.signup === 'open') problems.push('PAW_SIGNUP=open は使えません（first_user か closed にしてください）');
+  // alb_oidc には新規登録の経路そのものが無いので、PAW_SIGNUP は見ない
+  if (config.auth !== 'alb_oidc' && config.signup === 'open') problems.push('PAW_SIGNUP=open は使えません（first_user か closed にしてください）');
+  if (config.auth !== 'alb_oidc') problems.push('PAW_AUTH=alb_oidc が必要です（サーバーは ALB の Google ログインだけで入れます）');
+  if (!config.albArn) problems.push('PAW_ALB_ARN が未設定です（JWT の signer と照合する ALB の ARN）');
+  if (!config.allowedEmail) problems.push('PAW_ALLOWED_EMAIL が未設定です（入れる 1 人のメールアドレス）');
   if (config.seedDemo) problems.push('PAW_SEED_DEMO が有効です（PAW_SEED_DEMO=0 にしてください）');
   if (config.enableDevRoutes) problems.push('PAW_DEV_ROUTES が有効です（PAW_DEV_ROUTES=0 にしてください）');
   if (config.agentRuntime === 'claude_code') {

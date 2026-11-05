@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.9.0"
 
   required_providers {
     aws = {
@@ -18,4 +18,12 @@ provider "aws" {
       ManagedBy = "terraform"
     }
   }
+}
+
+# cloud-common アカウントの公開ゾーン（c.fnrr.biz）に DNS レコードを書くためのプロバイダー。
+# manage_dns = false のときは使わない（このプロバイダーを使うリソースを作らない）
+provider "aws" {
+  alias   = "dns"
+  region  = var.region
+  profile = var.manage_dns ? var.dns_profile : null
 }

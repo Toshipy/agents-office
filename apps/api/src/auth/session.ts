@@ -12,6 +12,9 @@ import { eq } from 'drizzle-orm';
 import type { AppEnv, Services } from '../app';
 import { users, workspaces } from '../db/schema';
 import { AppError } from '../lib/errors';
+import { log } from '../lib/logger';
+import { ensureEmailUser } from '../services/provision';
+import { verifyAlbOidc } from './albOidc';
 
 export const SESSION_COOKIE = 'paw_session';
 const SESSION_TTL_SEC = 12 * 3600;
@@ -40,7 +43,26 @@ export function clearSession(c: Context<AppEnv>) {
   deleteCookie(c, SESSION_COOKIE, { path: '/' });
 }
 
-async function resolveAuth(c: Context<AppEnv>, s: Services): Promise<AuthContext | null> {
+/** alb_oidc: ALB が付ける x-amzn-oidc-data の JWT を毎回確かめる。セッション Cookie は見ない */
+async function resolveAlbAuth(c: Context<AppEnv>, s: Services): Promise<AuthContext | null> {
+  const { albArn, allowedEmail } = s.config;
+  if (!albArn || !allowedEmail || !s.albKeyFetcher) return null;
+  const r = await verifyAlbOidc(c.req.header('x-amzn-oidc-data'), { albArn, allowedEmail, fetchKey: s.albKeyFetcher });
+  if (!r.ok) {
+    // 拒否の理由だけを残す（トークンやメールは出さない）
+    log.warn('alb_oidc rejected', { reason: r.reason });
+    // 公開鍵を取れないのは利用者のせいではないので、未許可（401）とは分けて 503 にする
+    if (r.reason === 'key_unavailable') throw new AppError(503, 'UNAVAILABLE', '認証の公開鍵を取得できません。しばらくしてからやり直してください');
+    return null;
+  }
+  const { userId, workspaceId } = await ensureEmailUser(s.db, r.identity.email, r.identity.name);
+  const [u] = await s.db.select({ username: users.username, displayName: users.displayName }).from(users).where(eq(users.id, userId));
+  if (!u) return null;
+  return { userId, username: u.username, displayName: u.displayName, workspaceId };
+}
+
+export async function resolveAuth(c: Context<AppEnv>, s: Services): Promise<AuthContext | null> {
+  if (s.config.auth === 'alb_oidc') return resolveAlbAuth(c, s);
   const token = getCookie(c, SESSION_COOKIE);
   if (!token) return null;
   let payload: Record<string, unknown>;

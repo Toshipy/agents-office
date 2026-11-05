@@ -42,7 +42,7 @@ if [ -z "$BRIDGE" ]; then
 fi
 ip link show "$BRIDGE" >/dev/null 2>&1 || { echo "ブリッジ $BRIDGE が見つかりません" >&2; exit 1; }
 
-# 規則は raw テーブルの PREROUTING に置く。filter の FORWARD/INPUT（Docker・Tailscale・ufw が順序を入れ替える）より前で
+# 規則は raw テーブルの PREROUTING に置く。filter の FORWARD/INPUT（Docker・ufw が順序を入れ替える）より前で
 # 評価されるので、他のサービスの再起動や規則の並びに左右されない。
 # 専用チェーンは PAW-TEST-A と PAW-TEST-B を交互に使う。新しい方を作り切ってから PREROUTING の呼び出しを差し替え、
 # 古い方を消すので、入れ直しの間も制限が途切れない（再実行しても同じ状態になる）
@@ -74,7 +74,7 @@ for dst in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10;
   iptables -t raw -A "$CHAIN" -d "$dst" -j DROP
 done
 
-# 3) ホスト自身のアドレス宛て（ゲートウェイ・インスタンスのアドレス・Tailscale のアドレスを含む）を落とす
+# 3) ホスト自身のアドレス宛て（ゲートウェイ・インスタンスのアドレスを含む）を落とす
 iptables -t raw -A "$CHAIN" -m addrtype --dst-type LOCAL -j DROP
 
 # このネットワークのブリッジから入ってきた通信だけを新しいチェーンで評価する。先に新しい呼び出しを入れてから、古いものを消す

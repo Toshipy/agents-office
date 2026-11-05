@@ -31,6 +31,7 @@ import { IssueIntake } from './github/issueIntake';
 import { IssueCleanup } from './github/issueCleanup';
 import { MAX_WEBHOOK_BYTES, receiveGithubWebhook } from './github/webhook';
 import { SeatWatcher } from './services/office';
+import { albPublicKeyFetcher, type AlbKeyFetcher } from './auth/albOidc';
 import { csrfGuard, requireAuth, type AuthContext } from './auth/session';
 import { registerAuthRoutes } from './routes/auth';
 import { registerWorkspaceRoutes } from './routes/workspace';
@@ -57,6 +58,8 @@ export interface Services {
   poller: GithubPoller | null;
   /** Tester の実行場所（起動時・Run の終わりに残ったコンテナを片付ける） */
   testSandbox: TestSandbox;
+  /** alb_oidc の JWT 検証に使う ALB の公開鍵の取得（local では null） */
+  albKeyFetcher: AlbKeyFetcher | null;
 }
 
 export type AppEnv = {
@@ -68,7 +71,7 @@ export type AppEnv = {
 
 export async function createServices(
   config: AppConfig,
-  opts: { runner?: AgentRunner; claudeClient?: ClaudeMessagesClient; githubFetch?: typeof fetch; testSandbox?: TestSandbox } = {},
+  opts: { runner?: AgentRunner; claudeClient?: ClaudeMessagesClient; githubFetch?: typeof fetch; testSandbox?: TestSandbox; albKeyFetcher?: AlbKeyFetcher } = {},
 ): Promise<Services> {
   setLogLevel(config.logLevel);
   const github = config.githubApp ? new GithubApp(config.githubApp, opts.githubFetch) : null;
@@ -116,8 +119,9 @@ export async function createServices(
   if (github) engine.setIssueCleanup(new IssueCleanup(db, github, config.githubLogin));
   const dispatcher = new Dispatcher(db, bus, engine, github, issueIntake);
   const seats = new SeatWatcher(db, bus);
-  const poller = github ? new GithubPoller(db, github, config.githubPollMs, config.githubLogin) : null;
-  return { db, client, config, bus, store, engine, dispatcher, issueIntake, seats, github, poller, testSandbox };
+  const poller = github ? new GithubPoller(db, github, config.githubPollMs, config.githubLogin, config.githubPollWindow) : null;
+  const albKeyFetcher = config.auth === 'alb_oidc' ? (opts.albKeyFetcher ?? albPublicKeyFetcher(config.awsRegion)) : null;
+  return { db, client, config, bus, store, engine, dispatcher, issueIntake, seats, github, poller, testSandbox, albKeyFetcher };
 }
 
 /**

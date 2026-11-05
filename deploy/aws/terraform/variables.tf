@@ -42,11 +42,11 @@ variable "vpc_cidr" {
 variable "ssm_prefix" {
   description = "秘密情報を置く SSM Parameter Store のパス（scripts/put-secrets.sh と同じ値）"
   type        = string
-  default     = "/paw"
+  default     = "/agents-office"
 
   validation {
     condition     = can(regex("^/[A-Za-z0-9_/-]+$", var.ssm_prefix)) && !endswith(var.ssm_prefix, "/")
-    error_message = "ssm_prefix は /paw のように / で始め、末尾に / を付けないでください。"
+    error_message = "ssm_prefix は /agents-office のように / で始め、末尾に / を付けないでください。"
   }
 }
 
@@ -70,17 +70,6 @@ variable "github_allowed_users" {
   }
 }
 
-variable "tailscale_hostname" {
-  description = "Tailscale 上の名前。公開 URL は https://<この名前>.<tailnet名>.ts.net になる"
-  type        = string
-  default     = "paw"
-
-  validation {
-    condition     = can(regex("^[a-z0-9-]+$", var.tailscale_hostname))
-    error_message = "tailscale_hostname は英小文字・数字・- で指定してください。"
-  }
-}
-
 variable "app_repo_url" {
   description = "サーバーに取得するこのアプリのリポジトリ"
   type        = string
@@ -100,5 +89,87 @@ variable "app_repo_ref" {
   validation {
     condition     = can(regex("^[A-Za-z0-9._/-]+$", var.app_repo_ref))
     error_message = "app_repo_ref はブランチ名で指定してください。"
+  }
+}
+
+variable "allowed_cidrs" {
+  description = "ALB の 443 番を開ける送信元 CIDR（社内 VPN の出口 IP。例: [\"203.0.113.1/32\"]）"
+  type        = list(string)
+
+  validation {
+    condition     = length(var.allowed_cidrs) > 0 && alltrue([for c in var.allowed_cidrs : can(cidrnetmask(c))])
+    error_message = "allowed_cidrs は 1 つ以上の IPv4 CIDR（例: 203.0.113.1/32）で指定してください。"
+  }
+
+  validation {
+    condition     = !contains(var.allowed_cidrs, "0.0.0.0/0") && !contains(var.allowed_cidrs, "::/0")
+    error_message = "allowed_cidrs に全世界（0.0.0.0/0）は指定できません。"
+  }
+}
+
+variable "domain_name" {
+  description = "公開するドメイン名"
+  type        = string
+  default     = "agents-office.c.fnrr.biz"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", var.domain_name))
+    error_message = "domain_name は英小文字・数字・- と . のドメイン名で指定してください。"
+  }
+}
+
+variable "dns_zone_name" {
+  description = "DNS レコードを作る公開ゾーン（cloud-common アカウント）"
+  type        = string
+  default     = "c.fnrr.biz"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", var.dns_zone_name))
+    error_message = "dns_zone_name は英小文字・数字・- と . のドメイン名で指定してください。"
+  }
+}
+
+variable "dns_profile" {
+  description = "cloud-common アカウントの AWS プロファイル名（DNS レコードを書くのに使う）"
+  type        = string
+  default     = "cloud-common"
+}
+
+variable "manage_dns" {
+  description = "true なら DNS レコード（証明書の検証・ドメイン）を Terraform が作る。false なら作らず、出力の検証用 CNAME を手で登録する（2 段階の適用）"
+  type        = bool
+  default     = true
+}
+
+variable "allowed_email" {
+  description = "ログインを許す Google アカウントのメールアドレス（1 人）"
+  type        = string
+  default     = "t.arai@fenrir.co.jp"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$", var.allowed_email))
+    error_message = "allowed_email はメールアドレスで指定してください（引用符や空白は使えません）。"
+  }
+}
+
+variable "google_client_id_param" {
+  description = "Google OAuth クライアント ID を入れた SSM パラメーター名。EC2 のロールが読めないよう ssm_prefix の外（-alb）に置く"
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.google_client_id_param == null || !startswith(var.google_client_id_param, "${var.ssm_prefix}/")
+    error_message = "google_client_id_param は ssm_prefix の内側（${var.ssm_prefix}/ 以下）に置けません。EC2 のロールが読めてしまうため、ssm_prefix の外を指定してください。"
+  }
+}
+
+variable "google_client_secret_param" {
+  description = "Google OAuth クライアント秘密を入れた SSM パラメーター名（SecureString）。EC2 のロールが読めないよう ssm_prefix の外（-alb）に置く"
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.google_client_secret_param == null || !startswith(var.google_client_secret_param, "${var.ssm_prefix}/")
+    error_message = "google_client_secret_param は ssm_prefix の内側（${var.ssm_prefix}/ 以下）に置けません。EC2 のロールが読めてしまうため、ssm_prefix の外を指定してください。"
   }
 }
