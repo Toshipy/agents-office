@@ -15,3 +15,4 @@ allowed_cidrs = ["203.0.113.1/32"]
 # manage_dns         = true # cloud-common に書けないときは false（README の 2 段階手順）
 # allowed_email      = "t.arai@fenrir.co.jp"
 # app_repo_ref       = "claude/intelligent-keller-3gj7mv"
+# ssm_prefix         = "/agents-office" # 変えるときは put-secrets.sh の PAW_SSM_PREFIX にも同じ値を渡す

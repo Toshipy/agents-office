@@ -1,6 +1,6 @@
 # Terraform で AWS に作る（EC2 1 台 + ALB・社内 VPN の出口 IP と Google ログインで制限）
 
-[手作業の手順](../README.md)に代わり、Terraform と起動時スクリプトでまとめて作ります。画面は社内 VPN の出口 IP からの接続に限り、さらに ALB の Google ログイン（許可は 1 アカウント）を通った人だけが開けます。Tailscale は使いません。
+AWS の作成からアプリの起動までを、Terraform と起動時スクリプトでまとめて行います（このファイルだけを正とします。[../README.md](../README.md) は Tester の通信制限の確認だけです）。画面は社内 VPN の出口 IP からの接続に限り、さらに ALB の Google ログイン（許可は 1 アカウント）を通った人だけが開けます。Tailscale は使いません。
 
 | 作るもの | 内容 |
 |---|---|
@@ -131,9 +131,13 @@ cd ~/Documents/agents-office/deploy/aws/terraform
 - `/agents-office/claude_code_oauth_token`、`/agents-office/github_app_private_key`、`/agents-office/session_secret`（自動で作る）
 - `/agents-office-alb/google_client_id`、`/agents-office-alb/google_client_secret`（EC2 のロールからは読めない場所）
 
-GitHub App の ID は秘密ではないので、手順 4 の `terraform.tfvars` に書きます。`ssm_prefix` を変えるときは、`PAW_SSM_PREFIX=/別の名前 ./scripts/put-secrets.sh` のように同じ値を渡してください。
+GitHub App の ID は秘密ではないので、手順 4 の `terraform.tfvars` に書きます。`ssm_prefix` を変えるときは、`PAW_SSM_PREFIX=/別の名前 ./scripts/put-secrets.sh` のように同じ値を渡し、手順 4 の `terraform.tfvars` にも同じ `ssm_prefix` を書いてください（食い違うと EC2 が秘密を読めません）。Google の秘密の場所（`google_client_id_param`・`google_client_secret_param`）は `${ssm_prefix}/` の内側に指定できません。
 
 ## 4. Terraform で作る
+
+**前提:** アプリは EC2 の起動時に GitHub から取得されます（既定のブランチは `claude/intelligent-keller-3gj7mv`）。この変更（`alb_oidc` 対応）を**既定のブランチへマージして push してから** apply してください。入っていない古いアプリを取得すると、古い起動時の検査が起動を拒み、ALB が 502 になります。別のブランチを使うときは `terraform.tfvars` の `app_repo_ref` に指定します。
+
+`cloud-common` の Route 53 に書けない場合（`manage_dns = false`）は、`terraform apply` の前に、後述の「2 段階の手順」を読んでください。
 
 ```bash
 cp terraform.tfvars.example terraform.tfvars
@@ -234,7 +238,7 @@ Tester の通信制限は、実機で確認してください（初回と、`sud
 1. **社内 VPN につないだ PC** で `https://agents-office.c.fnrr.biz` を開く。Google のログイン画面が出て、`allowed_email` のアカウントでログインでき、画面が開く
 2. **社内 VPN につないだスマホ**（社内用）でも同じ。ログインが通るかは未確認の項目です（設計書 11 章）
 3. **VPN を切る**と、画面が開けない（接続がタイムアウトする）
-4. **別の Google アカウント**でログインすると「このアカウントでは使えません」と出る（アプリが 403 を返す）
+4. **別の Google アカウント**でログインすると「このアカウントでは使えません」と出る（アプリが 401 を返す）
 5. **EC2 の IP に直接届かない**。パブリック IP を確認して、手元の Mac から次を実行し、タイムアウトで失敗すれば OK
 
 ```bash

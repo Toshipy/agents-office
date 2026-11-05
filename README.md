@@ -8,7 +8,7 @@
 > Project にローカルの git リポジトリを指定すると、Claude が Run ごとの専用ブランチで計画 → 実装 → テスト → レビューを進め、人が承認した後に PR にします（「Claude で実行する」）。
 > どちらも無い場合や、ローカルリポジトリを指定していない Project はシミュレーションで動きます。
 >
-> **PC を閉じていても動かしたい場合**は、AWS の EC2 1 台で常時起動し、GitHub App で実際のリポジトリとつなげます（Issue に `agents-office` ラベル → AI が作業 → 人が承認 → PR）。画面は社内 VPN の出口 IP からの接続に限り、ALB の Google ログイン（1 アカウントだけ）を通った人だけが開けます（GitHub の Webhook は受けず、サーバーが GitHub を見に行きます）、テストコマンドは Docker コンテナで動かします。手順は [deploy/aws/terraform/README.md](deploy/aws/terraform/README.md)（Terraform）にあります。Tester の通信制限の確認は [deploy/aws/README.md](deploy/aws/README.md) にあります。
+> **PC を閉じていても動かしたい場合**は、AWS の EC2 1 台で常時起動し、GitHub App で実際のリポジトリとつなげます（Issue に `agents-office` ラベル → AI が作業 → 人が承認 → PR）。画面は社内 VPN の出口 IP からの接続に限り、ALB の Google ログイン（1 アカウントだけ）を通った人だけが開けます。GitHub の Webhook は受けず、サーバーが GitHub を見に行きます。テストコマンドは Docker コンテナで動かします。手順は [deploy/aws/terraform/README.md](deploy/aws/terraform/README.md)（Terraform）にあります。Tester の通信制限の確認は [deploy/aws/README.md](deploy/aws/README.md) にあります。
 
 Agents Office のソースコード・3D モデル・固有デザイン・名称は使っていません（要求定義書 1.3 / ADR-015）。
 3D のキャラクター・机・島・ハブ・アイコンはすべてこのリポジトリ内のコードで作った独自のものです。
