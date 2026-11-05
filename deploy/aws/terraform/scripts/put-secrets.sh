@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 手元の Mac で実行する。秘密情報を SSM Parameter Store（SecureString）に登録する。
-# 値は Terraform の state にも Git にも入らない。サーバーは起動時にここから読む。
+# 値は Git に入らない。サーバーは起動時にここから読む。
+# ただし Google の OAuth 秘密は Terraform が読んで ALB のリスナーに渡すため、Terraform の state に平文で入る。
+# 他の値（Claude のトークン・GitHub の鍵など）は Terraform が読まないので state に入らない。
 #
 #   AWS_REGION=ap-northeast-1 ./scripts/put-secrets.sh
 #
@@ -26,7 +28,6 @@ put_secure_alb() {
   echo "  ✓ $ALB_PREFIX/$1"
 }
 
-show() { aws_ssm get-parameter --with-decryption --name "$PREFIX/$1" --query Parameter.Value --output text; }
 
 echo "リージョン: $REGION / 保存先: $PREFIX/*（Google は $ALB_PREFIX/*）"
 aws sts get-caller-identity --query Account --output text >/dev/null || {

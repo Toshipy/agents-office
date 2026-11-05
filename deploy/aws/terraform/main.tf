@@ -3,7 +3,8 @@
 #  - 公開は ALB（443 番）。受信は allowed_cidrs（社内 VPN の出口 IP）だけ、ログインは Google の OIDC（ALB 標準）
 #  - 証明書は ACM（DNS 検証）。DNS レコードは cloud-common アカウントの公開ゾーンに置く
 #  - サーバーには SSM Session Manager で入る（SSH の鍵もポートも不要）
-#  - 秘密情報は SSM Parameter Store（SecureString）に置き、起動時に読む。Terraform の state には入れない
+#  - 秘密情報は SSM Parameter Store（SecureString）に置き、起動時に読む。
+#    ただし Google の OAuth 秘密だけは Terraform が読んでリスナーに渡すため、state に平文で入る（state の扱いに注意）
 
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
@@ -37,6 +38,11 @@ data "aws_ec2_instance_type_offerings" "available" {
 # ALB 用の 2 つ目のアベイラビリティゾーン（ALB は 2 つ以上の AZ が要る）
 data "aws_availability_zones" "available" {
   state = "available"
+
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
 }
 
 # Google の OAuth クライアント（Terraform が読み、ALB のリスナーに渡す。EC2 のロールからは読めない場所に置く）
@@ -189,7 +195,9 @@ resource "aws_vpc_security_group_egress_rule" "instance_all" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-# ---- IAM（Session Manager と、${ssm_prefix}/* の秘密情報の読み取りだけ） ----
+# ---- IAM（Session Manager に要る最小の権限と、${ssm_prefix}/* の読み取りだけ） ----
+# AmazonSSMManagedInstanceCore は使わない。ssm:GetParameter(s) を全リソースに許し、同じアカウントの
+# 他システムの SecureString まで読めてしまうため（EC2 は AI エージェントを動かす）
 
 data "aws_iam_policy_document" "assume" {
   statement {
@@ -206,9 +214,44 @@ resource "aws_iam_role" "instance" {
   assume_role_policy = data.aws_iam_policy_document.assume.json
 }
 
-resource "aws_iam_role_policy_attachment" "ssm_core" {
-  role       = aws_iam_role.instance.name
-  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+# AWS 公式の「最小の Session Manager 権限」（ssm:UpdateInstanceInformation と ssmmessages の 4 つ）に、
+# SSM Agent のメッセージ受信に要る ec2messages を足したもの
+data "aws_iam_policy_document" "session_manager" {
+  statement {
+    sid       = "RegisterInstance"
+    actions   = ["ssm:UpdateInstanceInformation"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "SessionChannels"
+    actions = [
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "AgentMessages"
+    actions = [
+      "ec2messages:AcknowledgeMessage",
+      "ec2messages:DeleteMessage",
+      "ec2messages:FailMessage",
+      "ec2messages:GetEndpoint",
+      "ec2messages:GetMessages",
+      "ec2messages:SendReply",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "session_manager" {
+  name   = "${var.name}-session-manager"
+  role   = aws_iam_role.instance.id
+  policy = data.aws_iam_policy_document.session_manager.json
 }
 
 data "aws_iam_policy_document" "secrets" {
@@ -216,6 +259,14 @@ data "aws_iam_policy_document" "secrets" {
     sid       = "ReadAppParameters"
     actions   = ["ssm:GetParameter", "ssm:GetParameters"]
     resources = ["${local.ssm_param_arn}/*"]
+  }
+
+  # 念のための明示的な拒否: ssm_prefix の外（Google の OAuth 秘密や、同じアカウントの他システム）は読ませない
+  statement {
+    sid           = "DenyReadOutsidePrefix"
+    effect        = "Deny"
+    actions       = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
+    not_resources = ["${local.ssm_param_arn}/*"]
   }
 
   # SecureString の復号（AWS 管理キー aws/ssm を SSM 経由で使う場合だけ）

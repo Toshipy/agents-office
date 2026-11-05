@@ -25,5 +25,5 @@ provider "aws" {
 provider "aws" {
   alias   = "dns"
   region  = var.region
-  profile = var.dns_profile
+  profile = var.manage_dns ? var.dns_profile : null
 }

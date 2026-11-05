@@ -97,8 +97,8 @@ variable "allowed_cidrs" {
   type        = list(string)
 
   validation {
-    condition     = length(var.allowed_cidrs) > 0 && alltrue([for c in var.allowed_cidrs : can(cidrhost(c, 0))])
-    error_message = "allowed_cidrs は 1 つ以上の CIDR（例: 203.0.113.1/32）で指定してください。"
+    condition     = length(var.allowed_cidrs) > 0 && alltrue([for c in var.allowed_cidrs : can(cidrnetmask(c))])
+    error_message = "allowed_cidrs は 1 つ以上の IPv4 CIDR（例: 203.0.113.1/32）で指定してください。"
   }
 
   validation {
@@ -111,12 +111,22 @@ variable "domain_name" {
   description = "公開するドメイン名"
   type        = string
   default     = "agents-office.c.fnrr.biz"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", var.domain_name))
+    error_message = "domain_name は英小文字・数字・- と . のドメイン名で指定してください。"
+  }
 }
 
 variable "dns_zone_name" {
   description = "DNS レコードを作る公開ゾーン（cloud-common アカウント）"
   type        = string
   default     = "c.fnrr.biz"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", var.dns_zone_name))
+    error_message = "dns_zone_name は英小文字・数字・- と . のドメイン名で指定してください。"
+  }
 }
 
 variable "dns_profile" {
@@ -135,6 +145,11 @@ variable "allowed_email" {
   description = "ログインを許す Google アカウントのメールアドレス（1 人）"
   type        = string
   default     = "t.arai@fenrir.co.jp"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$", var.allowed_email))
+    error_message = "allowed_email はメールアドレスで指定してください（引用符や空白は使えません）。"
+  }
 }
 
 variable "google_client_id_param" {
