@@ -12,10 +12,13 @@ export interface AuthConfig {
 }
 
 export function useAuthConfig() {
-  return useQuery({ queryKey: ['auth-config'], queryFn: async () => {
+  return useQuery({
+    queryKey: ['auth-config'],
+    queryFn: async () => {
       const cfg = await api.get<AuthConfig>('/v1/auth/config');
       setAlbOidc(cfg.mode === 'alb_oidc');
       return cfg;
     },
-    staleTime: Infinity });
+    staleTime: Infinity,
+  });
 }

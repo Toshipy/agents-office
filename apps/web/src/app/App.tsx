@@ -63,19 +63,29 @@ export function App() {
   const qc = useQueryClient();
   useRealtime(qc, Boolean(me.data));
 
+  // me がエラーなら先に接続エラー画面を出す（config 待ちで遅らせない）。
   // 認証モードが分かるまで待つ（alb_oidc かどうかで未ログイン時の画面が変わる）
-  if (me.isLoading || (!me.data && cfg.isLoading)) {
+  const meFailed = Boolean(me.error && !me.data);
+  if (!meFailed && (me.isLoading || (!me.data && cfg.isLoading))) {
     return (
       <div className="boot">
         <div className="spinner" />
       </div>
     );
   }
-  if (me.error && !me.data) {
+  // 未ログインで認証設定を取れなかったとき、LoginPage に落とすと alb_oidc でも登録画面が出てしまう
+  const cfgFailed = !me.data && !cfg.data;
+  if (meFailed || cfgFailed) {
     return (
       <div className="boot error-text">
         <p>API に接続できません。`pnpm dev` で API が起動しているか確認してください。</p>
-        <button className="btn" onClick={() => void me.refetch()}>
+        <button
+          className="btn"
+          onClick={() => {
+            void me.refetch();
+            void cfg.refetch();
+          }}
+        >
           再試行
         </button>
       </div>
