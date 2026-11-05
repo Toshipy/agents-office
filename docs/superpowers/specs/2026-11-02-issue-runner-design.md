@@ -172,6 +172,8 @@ GitHub に出す前に、必ず画面で承認を取る。承認の種類 `publi
 
 ### 7.1 Webhook をやめてポーリングにする
 
+> 2026-11-06 の設計（[aws-alb-access-design](2026-11-06-aws-alb-access-design.md)）で置き換え。
+
 外から入る口を無くすため、Webhook の受け口を本番で無効にする。代わりに、サーバーが GitHub を定期的に見に行く。
 
 - 間隔は 60 秒（設定で変えられる）
@@ -209,6 +211,8 @@ AI が書き換えたテストやスクリプトを、秘密の見えない場�
 6.2 のとおり。Issue への指示の注入で AI がおかしな変更をしても、承認しなければ外に出ない。
 
 ### 8.3 公開範囲
+
+> 2026-11-06 の設計（[aws-alb-access-design](2026-11-06-aws-alb-access-design.md)）で置き換え。
 
 Tailscale Funnel をやめ、Tailscale のネットワーク内だけで開く（`tailscale serve`）。今は `bootstrap.sh:130` でアプリ全体をインターネットに出している。
 Webhook も受けないので、インターネットから届く口は無くなる。
@@ -255,6 +259,8 @@ worktree の `.git` はファイルで、git の実体の場所を指してい�
 - 完了の条件は `pnpm typecheck` と `pnpm test` が緑であること
 
 ## 11. 常時動かす手順
+
+> 2026-11-06 の設計（[aws-alb-access-design](2026-11-06-aws-alb-access-design.md)）で置き換え。
 
 `deploy/aws`（手作業）と `deploy/aws/terraform` を、次に合わせて直す。
 

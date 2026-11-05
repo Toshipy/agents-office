@@ -8,7 +8,7 @@
 > Project にローカルの git リポジトリを指定すると、Claude が Run ごとの専用ブランチで計画 → 実装 → テスト → レビューを進め、人が承認した後に PR にします（「Claude で実行する」）。
 > どちらも無い場合や、ローカルリポジトリを指定していない Project はシミュレーションで動きます。
 >
-> **PC を閉じていても動かしたい場合**は、AWS の EC2 1 台で常時起動し、GitHub App で実際のリポジトリとつなげます（Issue に `agents-office` ラベル → AI が作業 → 人が承認 → PR）。画面は Tailscale のネットワーク内だけで開き（`tailscale serve`。インターネットには公開せず、GitHub の Webhook も受けず、サーバーが GitHub を見に行きます）、テストコマンドは Docker コンテナで動かします。手順は [deploy/aws/README.md](deploy/aws/README.md)（手作業）と [deploy/aws/terraform/README.md](deploy/aws/terraform/README.md)（Terraform）にあります。
+> **PC を閉じていても動かしたい場合**は、AWS の EC2 1 台で常時起動し、GitHub App で実際のリポジトリとつなげます（Issue に `agents-office` ラベル → AI が作業 → 人が承認 → PR）。画面は社内 VPN の出口 IP からの接続に限り、ALB の Google ログイン（1 アカウントだけ）を通った人だけが開けます（GitHub の Webhook は受けず、サーバーが GitHub を見に行きます）、テストコマンドは Docker コンテナで動かします。手順は [deploy/aws/terraform/README.md](deploy/aws/terraform/README.md)（Terraform）にあります。Tester の通信制限の確認は [deploy/aws/README.md](deploy/aws/README.md) にあります。
 
 Agents Office のソースコード・3D モデル・固有デザイン・名称は使っていません（要求定義書 1.3 / ADR-015）。
 3D のキャラクター・机・島・ハブ・アイコンはすべてこのリポジトリ内のコードで作った独自のものです。
@@ -210,13 +210,13 @@ PAW_AGENT_RUNTIME=claude pnpm dev
 |---|---|
 | `PAW_GITHUB_APP_ID` / `PAW_GITHUB_APP_PRIVATE_KEY_FILE` | GitHub App の ID と秘密鍵（.pem）のパス |
 | `PAW_GITHUB_LOGIN` | 「自分担当」の Issue を判定する GitHub ログイン名（未設定なら `PAW_GITHUB_ALLOWED_USERS` の先頭） |
-| `PAW_GITHUB_POLL_MS` | GitHub を見に行く間隔（ミリ秒。既定 60000、最小 10000） |
+| `PAW_GITHUB_POLL_MS` | GitHub を見に行く間隔（ミリ秒。既定 900000（15 分）、最小 10000。見に行く時間帯は `PAW_GITHUB_POLL_WINDOW`（既定 `Mon-Fri 09:00-19:00 Asia/Tokyo`、`always` で制限なし）） |
 | `PAW_GITHUB_WEBHOOK` | `1` で署名付き Webhook の受け口を開く（開発用）。このときだけ `PAW_GITHUB_WEBHOOK_SECRET`（16 文字以上）が要る。本番では設定しない |
 | `PAW_TEST_SANDBOX` / `PAW_TEST_IMAGE` / `PAW_TEST_NETWORK` | Tester の実行方法（`docker` / `host`）、イメージ、Docker ネットワーク。サーバーモードは `docker` 必須 |
 | `PAW_GITHUB_ALLOWED_USERS` | ラベル・PR レビューを受け付ける GitHub ユーザー（カンマ区切り。未設定なら `PAW_GITHUB_LOGIN` だけ） |
 | `PAW_PUBLIC_URL` | 公開 URL（HTTPS なら Cookie に Secure を付け、Origin を許可） |
-| `PAW_SIGNUP` | `open`（既定）/ `first_user`（最初の 1 人だけ）/ `closed` |
-| `PAW_SIGNUP_CODE` | 設定すると、新規登録にこのコードが必要（公開 URL で他人に先に登録されないように） |
+| `PAW_SIGNUP` | ローカル開発用。常時運用は `PAW_AUTH=alb_oidc` で使わない。`open`（既定）/ `first_user`（最初の 1 人だけ）/ `closed` |
+| `PAW_SIGNUP_CODE` | ローカル開発用。設定すると、新規登録にこのコードが必要（公開 URL で他人に先に登録されないように） |
 | `PAW_SERVE_WEB` | `1` で API からビルド済みの画面も配信 |
 
 #### GitHub App の作り方（agents-office 専用）
@@ -229,18 +229,18 @@ PAW_AGENT_RUNTIME=claude pnpm dev
 
 #### 常時運用の初回確認
 
-[deploy/aws/README.md](deploy/aws/README.md) の手順で起動したら、次を順に確かめます。
+[deploy/aws/terraform/README.md](deploy/aws/terraform/README.md) の手順で起動したら、次を順に確かめます。
 
-1. サインインする（最初のユーザー `first_user` として、登録コードで登録）
+1. 社内 VPN につないだ端末で `https://agents-office.c.fnrr.biz` を開き、Google でログインする
 2. Projects で Repo を接続する（App を入れたリポジトリだけ選べる）
-3. 案件の Issue 一覧が出る（最大 60 秒）
+3. 案件の Issue 一覧が出る（平日の 9〜19 時に 15 分ごとに取得するので、最大 15 分）
 4. 影響の小さい Issue を 1 件「AI に任せる」
 5. 「GitHub に出す」の承認カードで差分を確かめて承認する
 6. PR ができる（本文は `Closes #<番号>` で始まる）
 
 #### Docker の権限（サーバー運用）
 
-Tester は Docker コンテナで動き、`paw` ユーザーを `docker` グループに入れます。**このグループはホストの root と同等の権限です。** それでも通常の Docker にしたのは、ホスト側の iptables（raw テーブル）でコンテナからホスト・内部ネットワーク・メタデータ・tailnet への通信を落とすためです（rootless Docker ではこの制限が効きません）。AI は `--restricted` で動かし、`docker` を呼ぶのはアプリだけにしています。詳細は [deploy/aws/README.md](deploy/aws/README.md) の手順 4b。
+Tester は Docker コンテナで動き、`paw` ユーザーを `docker` グループに入れます。**このグループはホストの root と同等の権限です。** それでも通常の Docker にしたのは、ホスト側の iptables（raw テーブル）でコンテナからホスト・内部ネットワーク・メタデータへの通信を落とすためです（rootless Docker ではこの制限が効きません）。AI は `--restricted` で動かし、`docker` を呼ぶのはアプリだけにしています。詳細は [deploy/aws/README.md](deploy/aws/README.md)。
 
 ### ブラウザだけで動くデモ
 
