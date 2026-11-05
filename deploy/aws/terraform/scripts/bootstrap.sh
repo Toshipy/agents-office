@@ -15,7 +15,9 @@ PAW_REGION='${PAW_REGION}'
 PAW_SSM_PREFIX='${PAW_SSM_PREFIX}'
 PAW_GITHUB_APP_ID='${PAW_GITHUB_APP_ID}'
 PAW_GITHUB_ALLOWED_USERS='${PAW_GITHUB_ALLOWED_USERS}'
-PAW_TS_HOSTNAME='${PAW_TS_HOSTNAME}'
+PAW_DOMAIN='${PAW_DOMAIN}'
+PAW_ALB_ARN='${PAW_ALB_ARN}'
+PAW_ALLOWED_EMAIL='${PAW_ALLOWED_EMAIL}'
 PAW_CLAUDE_CODE_RESTRICTED='1'
 EOF
 chmod 644 /etc/paw-bootstrap/settings
@@ -66,10 +68,10 @@ if [ ! -d /home/paw/agents-office/.git ]; then
 fi
 sudo -H -u paw bash -lc 'cd ~/agents-office && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm install --frozen-lockfile && pnpm --filter @paw/web build'
 
-# ---- 秘密情報と公開 URL から設定ファイルを作るスクリプト（後から再実行できる） ----
+# ---- 秘密情報と設定から設定ファイルを作るスクリプト（後から再実行できる） ----
 cat > /usr/local/bin/paw-config-sync <<'SYNC'
 #!/bin/bash
-# SSM Parameter Store の値から /etc/paw/paw.env と GitHub App の秘密鍵を作り直す。
+# SSM Parameter Store の値と Terraform が渡した設定から /etc/paw/paw.env と GitHub App の秘密鍵を作り直す。
 # 秘密情報を更新したら: sudo paw-config-sync && sudo systemctl restart paw
 set -euo pipefail
 . /etc/paw-bootstrap/settings
@@ -81,17 +83,15 @@ get github_app_private_key > /etc/paw/github-app.pem.new
 chown root:paw /etc/paw/github-app.pem.new && chmod 640 /etc/paw/github-app.pem.new
 mv /etc/paw/github-app.pem.new /etc/paw/github-app.pem
 
-dns="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-if [ -z "$dns" ]; then
-  echo "Tailscale の名前を取得できません（tailscale status を確認してください）" >&2
-  exit 1
-fi
-public_url="https://${dns}"
+public_url="https://${PAW_DOMAIN}"
 
 cat > /etc/paw/paw.env.new <<ENV
 PAW_PUBLIC_URL=${public_url}
-PAW_SIGNUP=first_user
-PAW_SIGNUP_CODE=$(get signup_code)
+PAW_AUTH=alb_oidc
+PAW_ALB_ARN=${PAW_ALB_ARN}
+PAW_ALLOWED_EMAIL=${PAW_ALLOWED_EMAIL}
+PAW_API_HOST=0.0.0.0
+PAW_AWS_REGION=${PAW_REGION}
 PAW_SEED_DEMO=0
 PAW_DEV_ROUTES=0
 PAW_DATA_DIR=/var/lib/paw
@@ -104,7 +104,7 @@ PAW_GITHUB_APP_ID=${PAW_GITHUB_APP_ID}
 PAW_GITHUB_APP_PRIVATE_KEY_FILE=/etc/paw/github-app.pem
 PAW_GITHUB_ALLOWED_USERS=${PAW_GITHUB_ALLOWED_USERS}
 PAW_GITHUB_LOGIN=${PAW_GITHUB_ALLOWED_USERS%%,*}
-PAW_GITHUB_POLL_MS=60000
+PAW_GITHUB_POLL_MS=900000
 PAW_TEST_SANDBOX=docker
 PAW_TEST_IMAGE=node:22-bookworm
 PAW_TEST_NETWORK=paw-test
@@ -112,7 +112,6 @@ ENV
 chown root:paw /etc/paw/paw.env.new && chmod 640 /etc/paw/paw.env.new
 mv /etc/paw/paw.env.new /etc/paw/paw.env
 
-aws ssm put-parameter --region "$PAW_REGION" --name "$PAW_SSM_PREFIX/public_url" --type String --overwrite --value "$public_url" >/dev/null
 echo "設定を更新しました（公開 URL: ${public_url}）"
 SYNC
 chmod 755 /usr/local/bin/paw-config-sync
@@ -138,24 +137,6 @@ systemctl restart paw
 echo "更新して再起動しました"
 UPDATE
 chmod 755 /usr/local/bin/paw-update
-
-param() {
-  aws ssm get-parameter --region "$PAW_REGION" --with-decryption --name "$PAW_SSM_PREFIX/$1" --query Parameter.Value --output text
-}
-
-# ---- Tailscale（tailnet 内だけで公開する。Funnel は使わない） ----
-if ! command -v tailscale >/dev/null 2>&1; then
-  log "Tailscale を入れます"
-  curl -fsSL https://tailscale.com/install.sh | sh
-fi
-log "Tailscale に接続します（名前: ${PAW_TS_HOSTNAME}）"
-tailscale up --auth-key="$(param tailscale_auth_key)" --hostname="${PAW_TS_HOSTNAME}"
-
-log "tailscale serve で 127.0.0.1:8787 を tailnet 内だけに公開します"
-if ! timeout 120 tailscale serve --bg --https=443 http://127.0.0.1:8787; then
-  log "tailscale serve を設定できませんでした。tailnet で HTTPS 証明書が有効になっていない可能性があります"
-  log "サーバーに入って次を実行し、表示されたリンクから有効にしてください: sudo tailscale serve --bg --https=443 http://127.0.0.1:8787"
-fi
 
 # ---- Tester 用の Docker ネットワークと通信制限 ----
 log "Tester 用の Docker ネットワークを作ります"
@@ -194,4 +175,4 @@ cp /home/paw/agents-office/deploy/aws/paw.service /etc/systemd/system/paw.servic
 systemctl daemon-reload
 systemctl enable --now paw
 
-log "起動時の準備が終わりました。公開 URL: $(aws ssm get-parameter --region "$PAW_REGION" --name "$PAW_SSM_PREFIX/public_url" --query Parameter.Value --output text 2>/dev/null || echo '（未取得）')"
+log "起動時の準備が終わりました。公開 URL: https://${PAW_DOMAIN}"

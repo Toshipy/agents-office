@@ -1,11 +1,17 @@
 # terraform.tfvars にコピーして値を入れる（このファイルに秘密情報は書かない）
 github_app_id        = "1234567"
 github_allowed_users = "Toshipy"
+# 社内 VPN の出口 IP（ALB の 443 番を開ける送信元。必須）
+allowed_cidrs = ["203.0.113.1/32"]
 
 # 以下は既定値のままでよい
 # region             = "ap-northeast-1"
 # instance_type      = "t4g.medium"
 # architecture       = "arm64"
 # root_volume_gb     = 30
-# tailscale_hostname = "paw"
+# domain_name        = "agents-office.c.fnrr.biz"
+# dns_zone_name      = "c.fnrr.biz"
+# dns_profile        = "cloud-common"
+# manage_dns         = true # cloud-common に書けないときは false（README の 2 段階手順）
+# allowed_email      = "t.arai@fenrir.co.jp"
 # app_repo_ref       = "claude/intelligent-keller-3gj7mv"

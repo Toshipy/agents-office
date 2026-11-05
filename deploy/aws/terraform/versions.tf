@@ -19,3 +19,11 @@ provider "aws" {
     }
   }
 }
+
+# cloud-common アカウントの公開ゾーン（c.fnrr.biz）に DNS レコードを書くためのプロバイダー。
+# manage_dns = false のときは使わない（このプロバイダーを使うリソースを作らない）
+provider "aws" {
+  alias   = "dns"
+  region  = var.region
+  profile = var.dns_profile
+}
