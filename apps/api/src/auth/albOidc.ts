@@ -2,7 +2,7 @@
  * ALB の OIDC 認証が `x-amzn-oidc-data` に載せる JWT（ES256）の検証。
  * 副作用は公開鍵の取得だけで、取得処理は呼び出し側から注入する。
  */
-import { verify } from 'node:crypto';
+import { createPublicKey, verify } from 'node:crypto';
 
 export interface AlbIdentity {
   email: string;
@@ -26,9 +26,12 @@ export function albPublicKeyFetcher(region: string, fetchImpl: typeof fetch = fe
     if (!KID_PATTERN.test(kid)) throw new Error('invalid kid');
     const hit = cache.get(kid);
     if (hit) return hit;
-    const res = await fetchImpl(`https://public-keys.auth.elb.${region}.amazonaws.com/${kid}`);
+    // 応答が返らないと認証の要求ごと止まるため、5 秒で打ち切る
+    const res = await fetchImpl(`https://public-keys.auth.elb.${region}.amazonaws.com/${kid}`, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) throw new Error(`public key fetch failed: ${res.status}`);
     const pem = await res.text();
+    // PEM として読めない 200 応答は、キャッシュせずに失敗として扱う（createPublicKey が例外を投げる）
+    createPublicKey(pem);
     cache.set(kid, pem);
     return pem;
   };

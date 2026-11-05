@@ -12,6 +12,7 @@ import { eq } from 'drizzle-orm';
 import type { AppEnv, Services } from '../app';
 import { users, workspaces } from '../db/schema';
 import { AppError } from '../lib/errors';
+import { log } from '../lib/logger';
 import { ensureEmailUser } from '../services/provision';
 import { verifyAlbOidc } from './albOidc';
 
@@ -47,7 +48,13 @@ async function resolveAlbAuth(c: Context<AppEnv>, s: Services): Promise<AuthCont
   const { albArn, allowedEmail } = s.config;
   if (!albArn || !allowedEmail || !s.albKeyFetcher) return null;
   const r = await verifyAlbOidc(c.req.header('x-amzn-oidc-data'), { albArn, allowedEmail, fetchKey: s.albKeyFetcher });
-  if (!r.ok) return null;
+  if (!r.ok) {
+    // 拒否の理由だけを残す（トークンやメールは出さない）
+    log.warn('alb_oidc rejected', { reason: r.reason });
+    // 公開鍵を取れないのは利用者のせいではないので、未許可（401）とは分けて 503 にする
+    if (r.reason === 'key_unavailable') throw new AppError(503, 'UNAVAILABLE', '認証の公開鍵を取得できません。しばらくしてからやり直してください');
+    return null;
+  }
   const { userId, workspaceId } = await ensureEmailUser(s.db, r.identity.email, r.identity.name);
   const [u] = await s.db.select({ username: users.username, displayName: users.displayName }).from(users).where(eq(users.id, userId));
   if (!u) return null;

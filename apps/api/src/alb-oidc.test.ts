@@ -64,13 +64,21 @@ describe('albPublicKeyFetcher', () => {
     expect(await f(KID)).toBe(pem);
     expect(await f(KID)).toBe(pem);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(fetchImpl).toHaveBeenCalledWith(`https://public-keys.auth.elb.ap-northeast-1.amazonaws.com/${KID}`);
+    expect(fetchImpl).toHaveBeenCalledWith(`https://public-keys.auth.elb.ap-northeast-1.amazonaws.com/${KID}`, { signal: expect.any(AbortSignal) });
     await expect(f('../etc/passwd')).rejects.toThrow();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('取得に失敗したらキャッシュせず例外を投げる', async () => {
     const fetchImpl = vi.fn(async () => new Response('no', { status: 404 }));
+    const f = albPublicKeyFetcher('ap-northeast-1', fetchImpl as unknown as typeof fetch);
+    await expect(f(KID)).rejects.toThrow();
+    await expect(f(KID)).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('PEM として読めない 200 応答はキャッシュせず例外を投げる', async () => {
+    const fetchImpl = vi.fn(async () => new Response('<html>not a key</html>', { status: 200 }));
     const f = albPublicKeyFetcher('ap-northeast-1', fetchImpl as unknown as typeof fetch);
     await expect(f(KID)).rejects.toThrow();
     await expect(f(KID)).rejects.toThrow();

@@ -1,12 +1,13 @@
 /**
  * PAW_AUTH=alb_oidc: ALB が渡す JWT だけで入る認証モード。
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { loadConfig } from './config';
 import { createApp, createServices, type Services } from './app';
 import { users, workspaces } from './db/schema';
 import { verifyPassword } from './lib/crypto';
+import { log } from './lib/logger';
 import { ALB_ARN, EMAIL, fetchKey, privateKey, signAlbJwt } from './testing/albJwt';
 
 let s: Services;
@@ -57,6 +58,36 @@ describe('alb_oidc の認証', () => {
 
   it('署名が違う JWT は 401', async () => {
     expect((await get('/v1/me', jwt({ tamper: true }))).status).toBe(401);
+  });
+
+  it('拒否したときは理由だけをログに残し、トークンやメールは出さない', async () => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+    try {
+      const token = jwt({ payload: { email: 'someone@fenrir.co.jp' } });
+      expect((await get('/v1/me', token)).status).toBe(401);
+      expect(warn).toHaveBeenCalledWith('alb_oidc rejected', { reason: 'not_allowed' });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('someone@fenrir.co.jp');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(token);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('公開鍵を取得できないときは 401 ではなく 503（UNAVAILABLE）', async () => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+    const saved = s.albKeyFetcher;
+    s.albKeyFetcher = async () => {
+      throw new Error('network');
+    };
+    try {
+      const res = await get('/v1/me', jwt());
+      expect(res.status).toBe(503);
+      expect((await json(res)).code).toBe('UNAVAILABLE');
+      expect(warn).toHaveBeenCalledWith('alb_oidc rejected', { reason: 'key_unavailable' });
+    } finally {
+      s.albKeyFetcher = saved;
+      warn.mockRestore();
+    }
   });
 
   it('セッション Cookie だけでは入れない', async () => {
